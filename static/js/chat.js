@@ -428,18 +428,18 @@ async function streamMessage(text, typingEl) {
 
           case 'generating':
             if (data.status === 'started') {
-              showGeneratingDialog(wrapper, bubble);
+              showGeneratingDialog(wrapper, bubble, data.agent);
             } else if (data.status === 'done') {
               hideGeneratingDialog(wrapper);
             }
             break;
 
           case 'media':
-            // Display generated images or file download links
+            // Display generated images, videos, or file downloads
             if (data.url && (data.url.endsWith('.pptx') || data.url.includes('pptx'))) {
               appendDownloadFile(bubble, data.url, data.filename || 'presentation.pptx');
             } else {
-              appendMediaImage(bubble, data.url, fullContent);
+              appendMedia(bubble, data.url);
             }
             $messages.scrollTop = $messages.scrollHeight;
             break;
@@ -547,18 +547,13 @@ function addMessage(role, content, opts = {}) {
   bubble.innerHTML = formatContent(content);
   wrapper.appendChild(bubble);
 
-  // Media (images + file downloads)
+  // Media (images, videos, file downloads)
   if (opts.media_urls && opts.media_urls.length) {
     opts.media_urls.forEach(url => {
       if (url && (url.endsWith('.pptx') || url.includes('pptx'))) {
         appendDownloadFile(bubble, url, 'presentation.pptx');
       } else {
-        const img = document.createElement('img');
-        img.src = url;
-        img.style.maxWidth = '400px';
-        img.style.borderRadius = '8px';
-        img.style.marginTop = '8px';
-        bubble.appendChild(img);
+        appendMedia(bubble, url);
       }
     });
   }
@@ -602,9 +597,14 @@ function addTypingIndicator() {
 }
 
 // ── Generating Dialog & Media ────────────────────────────────────────
-function showGeneratingDialog(wrapper, bubble) {
+function showGeneratingDialog(wrapper, bubble, agentName) {
   // Remove any existing generating dialog
   wrapper.querySelector('.generating-dialog')?.remove();
+
+  const isVideo = agentName === 'ugc_video';
+  const icon = isVideo ? '🎬' : '📸';
+  const title = isVideo ? 'Generating your video' : 'Generating your preview';
+  const sub = isVideo ? 'This may take 2-5 minutes...' : 'This may take a moment...';
 
   const dialog = document.createElement('div');
   dialog.className = 'generating-dialog';
@@ -621,11 +621,11 @@ function showGeneratingDialog(wrapper, bubble) {
             </linearGradient>
           </defs>
         </svg>
-        <span class="generating-icon">📸</span>
+        <span class="generating-icon">${icon}</span>
       </div>
       <div class="generating-text">
-        <strong>Generating your preview</strong>
-        <span class="generating-sub">This may take a moment...</span>
+        <strong>${title}</strong>
+        <span class="generating-sub">${sub}</span>
       </div>
       <div class="generating-dots">
         <div class="gdot"></div><div class="gdot"></div><div class="gdot"></div>
@@ -644,21 +644,39 @@ function hideGeneratingDialog(wrapper) {
   }
 }
 
-function appendMediaImage(bubble, url, existingContent) {
-  // Create image element for generated photos
-  const imgContainer = document.createElement('div');
-  imgContainer.className = 'generated-image-container';
-  imgContainer.innerHTML = `
-    <div class="generated-image-wrapper">
-      <img src="${url}" alt="Generated preview" class="generated-image" onclick="openImagePreview(this.src)"/>
-      <div class="generated-image-actions">
-        <button class="img-action-btn" onclick="openImagePreview('${url}')" title="View full size">🔍 View</button>
-        <button class="img-action-btn" onclick="downloadImage('${url}')" title="Download">⬇️ Download</button>
+function appendMedia(bubble, url) {
+  const isVideo = url.endsWith('.mp4') || url.endsWith('.webm') || url.endsWith('.mov');
+  const container = document.createElement('div');
+  container.className = 'generated-image-container';
+
+  if (isVideo) {
+    container.innerHTML = `
+      <div class="generated-video-wrapper">
+        <video controls playsinline class="generated-video">
+          <source src="${url}" type="video/mp4"/>
+          Your browser does not support video playback.
+        </video>
+        <div class="generated-image-actions">
+          <button class="img-action-btn" onclick="downloadMedia('${url}', 'kai-video.mp4')" title="Download">⬇️ Download</button>
+        </div>
       </div>
-    </div>
-  `;
-  bubble.appendChild(imgContainer);
+    `;
+  } else {
+    container.innerHTML = `
+      <div class="generated-image-wrapper">
+        <img src="${url}" alt="Generated preview" class="generated-image" onclick="openImagePreview(this.src)"/>
+        <div class="generated-image-actions">
+          <button class="img-action-btn" onclick="openImagePreview('${url}')" title="View full size">🔍 View</button>
+          <button class="img-action-btn" onclick="downloadMedia('${url}', 'vera-preview.png')" title="Download">⬇️ Download</button>
+        </div>
+      </div>
+    `;
+  }
+  bubble.appendChild(container);
 }
+
+// Keep backward compat
+function appendMediaImage(bubble, url) { appendMedia(bubble, url); }
 
 function openImagePreview(src) {
   const overlay = document.createElement('div');
@@ -673,12 +691,14 @@ function openImagePreview(src) {
   document.body.appendChild(overlay);
 }
 
-function downloadImage(url) {
+function downloadMedia(url, filename) {
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'vera-preview.png';
+  a.download = filename || 'download';
   a.click();
 }
+// Keep backward compat
+function downloadImage(url) { downloadMedia(url, 'vera-preview.png'); }
 
 function appendDownloadFile(bubble, url, filename) {
   // Create a styled download card for non-image files (PPTX, etc.)

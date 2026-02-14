@@ -60,7 +60,7 @@ class FeatureFlags(BaseSettings):
 
     # ── Agents ───────────────────────────────────────────────────────
     enable_ugc_video: bool = Field(default=True, alias="FF_ENABLE_UGC_VIDEO")
-    # Requires: AIML_API_KEY, ELEVENLABS_API_KEY, LIPSYNC_API_KEY
+    # Requires: GEMINI_API_KEY (Veo 3.1 for video generation)
 
     enable_fashion_photo: bool = Field(default=True, alias="FF_ENABLE_FASHION_PHOTO")
     # Requires: AIML_API_KEY

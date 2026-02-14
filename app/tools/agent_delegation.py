@@ -68,7 +68,7 @@ async def _try_delegate(agent_name: str, task: str, db, tenant_id: str, **kwargs
 
     Returns agent response string (possibly with handoff marker).
     """
-    from ..services.agent_session import load_agent_session, save_agent_session
+    from ..services.agent_session import load_agent_session, save_agent_session, deactivate_agent_session
 
     agent = get_registry().get(agent_name)
     if not agent:
@@ -76,9 +76,11 @@ async def _try_delegate(agent_name: str, task: str, db, tenant_id: str, **kwargs
 
     user_id = kwargs.get("user_id", "")
 
-    # Load persisted session state (so Vera resumes from last step)
-    saved_state = await load_agent_session(db, tenant_id, user_id, agent_name)
-    agent_state = dict(saved_state) if saved_state else {}
+    # Fresh delegation from Eve → deactivate any stale session and start clean.
+    # Multi-turn continuation (user talking directly to agent) goes through
+    # the orchestrator's direct routing path, not through _try_delegate.
+    await deactivate_agent_session(db, tenant_id, user_id, agent_name)
+    agent_state = {}
 
     # Inject brand context
     if "_brand" in kwargs:
@@ -178,8 +180,8 @@ sample_offer: Want me to bring Kai onto your team? He can start by reviewing you
 @tool(
     name="agent_ugc_video",
     description=(
-        "Delegate to Kai, the UGC Creator. Kai creates short-form UGC marketing videos "
-        "with AI avatars, scripts, voiceover, and lip-sync. "
+        "Delegate to Kai, the UGC Creator. Kai generates short-form UGC marketing videos "
+        "using Veo 3.1 — complete 8-second videos with native audio from text prompts. "
         "\n\nWhen to use: User wants UGC videos, marketing videos, TikTok content, "
         "video ads, product videos, short-form content, or mentions video creation. "
         "\n\nProvide: A clear task description with product/brand, audience, style."

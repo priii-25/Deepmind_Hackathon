@@ -1,12 +1,13 @@
 """
-UGC Video agent — state-machine-based workflow.
+UGC Video agent — Veo 3.1 powered.
 
-Pipeline: collect_info → generate_script → generate_image → generate_audio → compose_video → deliver
-Each step collects what it needs, processes, and advances to the next.
-Full external API calls will be wired in later; the state machine is production-ready.
+Pipeline: collect_info → confirm_brief → generate_video → deliver
+Generates complete 8-second marketing videos with native audio from text prompts.
 """
 
 import logging
+import uuid
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,25 +16,24 @@ from ...orchestrator.base_agent import BaseAgent, AgentResponse, AgentStatus
 
 logger = logging.getLogger(__name__)
 
-# Workflow steps
-STEPS = ["collect_info", "confirm_brief", "generate_script", "generate_image", "generate_audio", "compose_video", "deliver"]
+STEPS = ["collect_info", "confirm_brief", "generate_video", "deliver"]
 
 
 class UGCVideoAgent(BaseAgent):
     name = "ugc_video"
     display_name = "UGC Content Creator"
-    description = "Creates UGC-style marketing videos with AI-generated images, scripts, voiceover, and lip-sync"
+    description = "Creates UGC-style marketing videos with AI-generated video, audio, and scripts using Veo 3.1"
     triggers = [
         "ugc", "ugc video", "content creator", "create video",
         "make a video", "marketing video", "tiktok content",
         "video ad", "product video",
     ]
     capabilities = [
-        "AI image generation for video scenes",
-        "Script writing for marketing videos",
-        "Text-to-speech voiceover (ElevenLabs)",
-        "Lip-sync video composition (Sync.so)",
-        "Multiple video styles (casual, professional, energetic)",
+        "AI video generation with native audio (Veo 3.1)",
+        "Script and prompt optimization for marketing videos",
+        "Multiple aspect ratios (9:16 for TikTok/Reels, 16:9 for YouTube)",
+        "Brand-consistent video content",
+        "Platform-native output for TikTok, Reels, and YouTube Shorts",
     ]
     required_inputs = ["product/brand name", "target audience", "video style"]
 
@@ -55,15 +55,12 @@ class UGCVideoAgent(BaseAgent):
         if step in ("start", "collect_info"):
             return await self._collect_info(message, state)
         elif step == "confirm_brief":
-            return await self._confirm_brief(message, state)
-        elif step == "generate_script":
-            return await self._generate_script(state)
-        elif step in ("generate_image", "generate_audio", "compose_video"):
-            return await self._pipeline_step(step, state)
+            return await self._confirm_brief(message, state, db, user_id, tenant_id)
+        elif step == "generate_video":
+            return await self._generate_video(state, db, user_id, tenant_id)
         elif step == "deliver":
             return await self._deliver(state)
         else:
-            # Unknown step — restart
             return await self._collect_info(message, {})
 
     async def _collect_info(self, message: str, state: dict) -> AgentResponse:
@@ -79,19 +76,16 @@ class UGCVideoAgent(BaseAgent):
             if brand.get("industry"):
                 info["industry"] = brand["industry"]
 
-        # Parse info from message (basic extraction — LLM-powered extraction comes later)
-        msg_lower = message.lower()
         if not info.get("product"):
             info["product"] = message.strip()
 
-        # Check what we still need
-        missing = []
-        if not info.get("product"):
-            missing.append("the product or brand name")
         if not info.get("audience"):
-            info["audience"] = "general audience"  # Default
+            info["audience"] = "general audience"
         if not info.get("style"):
-            info["style"] = info.get("tone", "casual, energetic")  # Use brand tone if available
+            info["style"] = info.get("tone", "casual, energetic")
+
+        # Defaults for video generation
+        info.setdefault("aspect_ratio", "9:16")
 
         new_state = self._set_step(state, "confirm_brief", AgentStatus.COLLECTING_INPUT)
         new_state["brief"] = info
@@ -100,9 +94,10 @@ class UGCVideoAgent(BaseAgent):
         brief_summary = (
             f"Here's what I have so far:\n"
             f"{brand_line}"
-            f"- Product/Brand: {info.get('product', 'Not specified')}\n"
+            f"- Product/Topic: {info.get('product', 'Not specified')}\n"
             f"- Target Audience: {info.get('audience', 'General')}\n"
-            f"- Style: {info.get('style', 'Casual')}\n\n"
+            f"- Style: {info.get('style', 'Casual')}\n"
+            f"- Aspect Ratio: {info.get('aspect_ratio', '9:16')}\n\n"
             f"Does this look right? Say 'yes' to proceed, or tell me what to change."
         )
 
@@ -114,20 +109,17 @@ class UGCVideoAgent(BaseAgent):
             status=AgentStatus.COLLECTING_INPUT,
         )
 
-    async def _confirm_brief(self, message: str, state: dict) -> AgentResponse:
-        """Step 2: User confirms or modifies the brief."""
+    async def _confirm_brief(
+        self, message: str, state: dict,
+        db: AsyncSession, user_id: str, tenant_id: str,
+    ) -> AgentResponse:
+        """Step 2: User confirms → immediately generate prompt + video in one shot."""
         msg_lower = message.lower().strip()
 
         if msg_lower in ("yes", "y", "looks good", "proceed", "go", "ok", "correct", "confirm"):
-            new_state = self._set_step(state, "generate_script", AgentStatus.PROCESSING)
-            return AgentResponse(
-                content="Great! Starting script generation for your UGC video...",
-                state_update=new_state,
-                is_complete=False,
-                status=AgentStatus.PROCESSING,
-            )
+            # Auto-advance: generate prompt + video in one go
+            return await self._generate_video(state, db, user_id, tenant_id)
         else:
-            # User wants changes — go back to collect info
             new_state = self._set_step(state, "collect_info", AgentStatus.COLLECTING_INPUT)
             return AgentResponse(
                 content="Got it. Tell me what you'd like to change about the brief.",
@@ -137,73 +129,191 @@ class UGCVideoAgent(BaseAgent):
                 status=AgentStatus.COLLECTING_INPUT,
             )
 
-    async def _generate_script(self, state: dict) -> AgentResponse:
-        """Step 3: Generate video script. (API integration placeholder)"""
+    async def _build_veo_prompt(self, brief: dict) -> str:
+        """Use LLM to convert the brief into an optimized Veo video prompt."""
+        from ...services.llm import chat_simple
+
+        product = brief.get("product", "product")
+        audience = brief.get("audience", "general audience")
+        style = brief.get("style", "casual, energetic")
+        brand_name = brief.get("brand_name", "")
+
+        brand_context = f"Brand: {brand_name}. " if brand_name else ""
+
+        user_prompt = (
+            f"{brand_context}"
+            f"Product/Topic: {product}. "
+            f"Target audience: {audience}. "
+            f"Style/Tone: {style}."
+        )
+
+        system_prompt = """You are an expert video prompt engineer for Veo 3.1 (Google's AI video model).
+
+Your job: Convert a marketing brief into a single, detailed video generation prompt.
+
+The video will be 8 seconds long with native audio. Write a vivid, specific prompt that describes:
+1. The visual scene (setting, lighting, camera angles, movement)
+2. The subject/person (appearance, actions, expressions)
+3. The product placement and how it's showcased
+4. The audio/dialogue (what the person says, background sounds)
+5. The mood and energy level
+
+Guidelines:
+- Write in present tense, describing what's happening in the video
+- Be specific about camera movements (tracking shot, close-up, pull-back, etc.)
+- Include natural dialogue that feels authentic UGC (not scripted/corporate)
+- Mention lighting and color grading for professional look
+- Keep it to one focused scene that tells a complete mini-story
+- The video should feel like genuine user-generated content, not a polished ad
+
+Output ONLY the prompt text. No explanations, no markdown, no labels."""
+
+        try:
+            veo_prompt = await chat_simple(
+                prompt=user_prompt,
+                system=system_prompt,
+                temperature=0.8,
+                max_tokens=500,
+            )
+            return veo_prompt.strip()
+        except Exception as e:
+            logger.error("Failed to generate Veo prompt via LLM: %s", e)
+            return (
+                f"A person enthusiastically reviewing {product} in a well-lit room, "
+                f"speaking directly to camera in a {style} tone, "
+                f"holding up the product and showing its features, "
+                f"natural lighting, UGC style video"
+            )
+
+    async def _generate_video(
+        self, state: dict, db: AsyncSession, user_id: str, tenant_id: str,
+    ) -> AgentResponse:
+        """Generate Veo prompt + call Veo 3.1 + upload + save asset. All in one step."""
+        from ...services.veo import generate_video
+        from ...core.storage import get_storage, LocalStorage
+
         brief = state.get("brief", {})
-        product = brief.get("product", "your product")
-        style = brief.get("style", "casual")
+        aspect_ratio = brief.get("aspect_ratio", "9:16")
 
-        # TODO: Call LLM to generate actual script
-        script = (
-            f"[Scene 1] Close-up of {product} on a clean background\n"
-            f"[VO] \"Hey everyone! Let me show you something amazing...\"\n"
-            f"[Scene 2] Product in use, {style} setting\n"
-            f"[VO] \"I've been using {product} for a week and honestly...\"\n"
-            f"[Scene 3] Results/testimonial shot\n"
-            f"[VO] \"...it completely changed my routine. You NEED to try this.\"\n"
-            f"[CTA] Link in bio!"
-        )
+        # Step A: Generate optimized Veo prompt
+        veo_prompt = state.get("veo_prompt", "")
+        if not veo_prompt:
+            veo_prompt = await self._build_veo_prompt(brief)
 
-        new_state = self._set_step(state, "generate_image", AgentStatus.PROCESSING)
-        new_state["script"] = script
+        logger.info("Veo prompt: %s", veo_prompt[:100])
 
-        return AgentResponse(
-            content=f"Script generated:\n\n{script}\n\nNow generating visuals...",
-            state_update=new_state,
-            is_complete=False,
-            status=AgentStatus.PROCESSING,
-        )
+        # Step B: Call Veo 3.1
+        try:
+            video_bytes = await generate_video(
+                prompt=veo_prompt,
+                aspect_ratio=aspect_ratio,
+            )
 
-    async def _pipeline_step(self, step: str, state: dict) -> AgentResponse:
-        """Steps 4-6: Image gen, audio gen, video composition. (Placeholders)"""
-        step_messages = {
-            "generate_image": ("Generating AI images for video scenes...", "generate_audio"),
-            "generate_audio": ("Generating voiceover audio...", "compose_video"),
-            "compose_video": ("Composing final video with lip-sync...", "deliver"),
-        }
+            # Step C: Upload to storage
+            storage = get_storage()
+            filename = f"ugc_video_{uuid.uuid4().hex[:8]}.mp4"
+            path_or_url = await storage.upload(
+                file_bytes=video_bytes,
+                filename=filename,
+                tenant_id=tenant_id,
+                folder="ugc_videos",
+            )
 
-        message, next_step = step_messages.get(step, ("Processing...", "deliver"))
+            # For local storage, convert file path to servable URL (keep .mp4 extension)
+            if isinstance(storage, LocalStorage):
+                file_name = Path(path_or_url).name
+                video_url = f"/v1/upload/{file_name}"
+            else:
+                video_url = path_or_url
 
-        # TODO: Wire in actual API calls (AIML for images, ElevenLabs for audio, Sync.so for lipsync)
-        new_state = self._set_step(state, next_step, AgentStatus.PROCESSING)
-        new_state[f"{step}_complete"] = True
+            # Step D: Save UGC asset record
+            try:
+                from ...models.ugc import UGCAsset
+                asset = UGCAsset(
+                    tenant_id=tenant_id,
+                    conversation_id=state.get("_conversation_id", ""),
+                    asset_type="video",
+                    s3_url=video_url,
+                    prompt=veo_prompt,
+                    status="completed",
+                    asset_metadata={
+                        "generator": "veo-3.1",
+                        "aspect_ratio": aspect_ratio,
+                        "brief": brief,
+                    },
+                )
+                db.add(asset)
+                await db.flush()
+                logger.info("Created UGCAsset: id=%s url=%s", asset.id, video_url)
+            except Exception as e:
+                logger.warning("Could not save UGCAsset record: %s", e)
 
-        return AgentResponse(
-            content=f"{message}\n\n(Pipeline step '{step}' — external API integration coming soon)",
-            state_update=new_state,
-            is_complete=False,
-            status=AgentStatus.PROCESSING,
-        )
+            # Step E: Deliver
+            new_state = self._complete(state)
+            new_state["video_url"] = video_url
+            new_state["veo_prompt"] = veo_prompt
+
+            return AgentResponse(
+                content=(
+                    f"Your UGC video is ready!\n\n"
+                    f"**Prompt used:** *\"{veo_prompt}\"*\n\n"
+                    f"- Product: {brief.get('product', 'N/A')}\n"
+                    f"- Style: {brief.get('style', 'N/A')}\n"
+                    f"- Aspect Ratio: {aspect_ratio}\n\n"
+                    f"Would you like to make another video or do something else?"
+                ),
+                state_update=new_state,
+                media_urls=[video_url],
+                is_complete=True,
+                status=AgentStatus.COMPLETE,
+            )
+
+        except TimeoutError as e:
+            logger.error("Veo generation timed out: %s", e)
+            new_state = self._set_step(state, "generate_video", AgentStatus.ERROR)
+            new_state["veo_prompt"] = veo_prompt
+            return AgentResponse(
+                content=(
+                    "The video generation timed out. This can happen with complex prompts.\n\n"
+                    "Say 'retry' to try again, or tell me what to change about the brief."
+                ),
+                state_update=new_state,
+                is_complete=False,
+                needs_input="Retry or adjust?",
+                status=AgentStatus.ERROR,
+            )
+
+        except Exception as e:
+            logger.error("Veo generation failed: %s", e)
+            new_state = self._set_step(state, "generate_video", AgentStatus.ERROR)
+            new_state["veo_prompt"] = veo_prompt
+            return AgentResponse(
+                content=(
+                    f"Video generation failed: {e}\n\n"
+                    "Say 'retry' to try again, or tell me what to change."
+                ),
+                state_update=new_state,
+                is_complete=False,
+                needs_input="Retry or adjust?",
+                status=AgentStatus.ERROR,
+            )
 
     async def _deliver(self, state: dict) -> AgentResponse:
-        """Final step: Deliver the completed video."""
+        """Fallback deliver step (normally reached via _generate_video directly)."""
+        brief = state.get("brief", {})
+        video_url = state.get("video_url", "")
         new_state = self._complete(state)
 
         return AgentResponse(
             content=(
-                "Your UGC video has been created! "
-                "(Full pipeline with actual video delivery coming soon.)\n\n"
-                "Summary:\n"
-                f"- Product: {state.get('brief', {}).get('product', 'N/A')}\n"
-                f"- Style: {state.get('brief', {}).get('style', 'N/A')}\n"
-                f"- Script: Generated\n"
-                f"- Images: Generated\n"
-                f"- Audio: Generated\n"
-                f"- Video: Composed\n\n"
+                "Your UGC video is ready!\n\n"
+                f"- Product: {brief.get('product', 'N/A')}\n"
+                f"- Style: {brief.get('style', 'N/A')}\n"
+                f"- Aspect Ratio: {brief.get('aspect_ratio', '9:16')}\n\n"
                 "Would you like to make another video or do something else?"
             ),
             state_update=new_state,
+            media_urls=[video_url] if video_url else [],
             is_complete=True,
             status=AgentStatus.COMPLETE,
-            metadata={"pipeline_steps_completed": [s for s in STEPS if state.get(f"{s}_complete")]},
         )

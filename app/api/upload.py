@@ -159,7 +159,7 @@ async def upload_multipart(
 
 # ── GET /v1/upload/{file_id} — serve uploaded file ───────────────────
 
-@upload_router.get("/upload/{file_id}")
+@upload_router.get("/upload/{file_id:path}")
 async def serve_file(file_id: str):
     """Serve a locally stored uploaded file (images, videos, documents)."""
     storage = get_storage()

@@ -249,10 +249,7 @@ async def handle_message_stream(
     else:
         # Non-streaming fallback (used for direct agent routing, e.g. Vera)
 
-        # Show "generating" indicator if this turn might trigger image generation.
-        # The state machine advances scene_select → preview → generation inside handle(),
-        # but agent_state still holds the PREVIOUS turn's step. So we check for the
-        # last data-collection step (scene_select) AND the preview steps themselves.
+        # Show "generating" indicator if this turn might trigger image/video generation.
         is_generating = (
             agent_name == "fashion_photo"
             and agent_state.get("current_step") in ("scene_select", "preview", "preview_feedback")
@@ -262,7 +259,11 @@ async def handle_message_stream(
             agent_name == "presentation"
             and agent_state.get("_step", "start") in ("start", "collect_topic", "generate_slides")
         )
-        if is_generating:
+        is_generating_video = (
+            agent_name == "ugc_video"
+            and agent_state.get("_step") in ("confirm_brief", "generate_video")
+        )
+        if is_generating or is_generating_video:
             yield {"type": "generating", "agent": agent_name, "status": "started"}
 
         try:
@@ -275,7 +276,7 @@ async def handle_message_stream(
             response = AgentResponse(content=f"Error: {e}", is_complete=True)
 
         # Hide generating indicator
-        if is_generating:
+        if is_generating or is_generating_video:
             yield {"type": "generating", "agent": agent_name, "status": "done"}
 
         yield {"type": "token", "content": response.content}
