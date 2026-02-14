@@ -14,6 +14,7 @@ from .ugc import UGCConversation, UGCAsset, Avatar
 from .fashion import FashionSession, FashionImage, Apparel
 from .social_media import SocialToken, SocialPost
 from .presentation import Presentation
+from .memory import UserMemory
 
 __all__ = [
     "TenantBase",
@@ -28,4 +29,5 @@ __all__ = [
     "FashionSession", "FashionImage", "Apparel",
     "SocialToken", "SocialPost",
     "Presentation",
+    "UserMemory",
 ]

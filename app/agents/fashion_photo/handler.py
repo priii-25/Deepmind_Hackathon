@@ -86,6 +86,20 @@ def _build_system_prompt(state: dict) -> str:
                 "If the user has a logo URL, offer to incorporate it into the shoot.\n"
             )
 
+    # Past photoshoots section
+    past_shoots_section = ""
+    past_shoots = state.get("_past_shoots")
+    if past_shoots:
+        shoot_lines = []
+        for i, s in enumerate(past_shoots, 1):
+            shoot_lines.append(f"{i}. {s['scene']} | Model: {s['avatar']} | {s['date']}")
+        past_shoots_section = (
+            "\n\nPAST PHOTOSHOOTS (user's previous work with you):\n"
+            + "\n".join(shoot_lines) + "\n"
+            "Reference these when the user says 'like last time', 'similar to before', or asks about past shoots.\n"
+            "You can suggest building on a previous scene or trying a new direction based on what worked.\n"
+        )
+
     return f"""You are Vera, a professional Fashion Photographer AI on Teems.
 
 PERSONALITY:
@@ -94,7 +108,7 @@ PERSONALITY:
 - Present options naturally within your message text — like you're suggesting ideas in a conversation
 - NEVER use bullet points, numbered lists, or formatted option menus
 - Instead weave the choices into a natural sentence
-{brand_section}
+{brand_section}{past_shoots_section}
 HANDLING USER INPUT:
 - Users may respond with exact option text OR something totally different/creative/vague
 - ALWAYS map what the user says to the closest matching option. Be generous in interpretation.
@@ -471,6 +485,41 @@ class FashionPhotoAgent(BaseAgent):
         # Store tenant_id in state for storage access during generation
         if tenant_id:
             state["_tenant_id"] = tenant_id
+
+        # Load past photoshoots so Vera can reference them
+        if "_past_shoots" not in state:
+            try:
+                from ...models.fashion import FashionImage
+                from sqlalchemy import select as sa_select
+
+                current_session = state.get("_fashion_session_id", "")
+                query = (
+                    sa_select(FashionImage)
+                    .where(
+                        FashionImage.tenant_id == tenant_id,
+                        FashionImage.angle == "preview",
+                    )
+                    .order_by(FashionImage.created_at.desc())
+                    .limit(8)
+                )
+                result = await db.execute(query)
+                images = result.scalars().all()
+
+                past = []
+                for img in images:
+                    if img.session_id == current_session:
+                        continue
+                    meta = img.image_metadata or {}
+                    past.append({
+                        "scene": img.scene_description or "Unknown scene",
+                        "avatar": meta.get("avatar_name", meta.get("avatar_choice", "no model")),
+                        "url": img.s3_url or "",
+                        "date": img.created_at.strftime("%b %d") if img.created_at else "",
+                    })
+                if past:
+                    state["_past_shoots"] = past[:6]
+            except Exception as e:
+                logger.debug("Could not load past shoots: %s", e)
 
         current_step = state.get("current_step", "intro")
         phase = state.get("phase", "gathering")

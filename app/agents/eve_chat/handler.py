@@ -249,9 +249,11 @@ class EveChatAgent(BaseAgent):
         tenant_id: str,
         files: Optional[list] = None,
         history: Optional[list[dict]] = None,
+        session_id: str = "",
     ) -> AgentResponse:
         """Handle a message with LLM + parallel tool calling + agent delegation."""
         start_time = time.monotonic()
+        self._session_id = session_id
 
         # ── Guardrail: Input validation ───────────────────────────
         if len(message) > MAX_INPUT_LENGTH:
@@ -300,6 +302,12 @@ class EveChatAgent(BaseAgent):
                 )
 
             # ── Process tool calls in parallel ────────────────────
+            # Strip any non-standard fields from tool calls before appending
+            if assistant_msg.get("tool_calls"):
+                assistant_msg["tool_calls"] = [
+                    {k: v for k, v in tc.items() if k in ("id", "type", "function")}
+                    for tc in assistant_msg["tool_calls"]
+                ]
             messages.append(assistant_msg)
             tool_results = await self._execute_tool_calls(
                 assistant_msg["tool_calls"],
@@ -356,6 +364,7 @@ class EveChatAgent(BaseAgent):
         user_id: str,
         tenant_id: str,
         history: Optional[list[dict]] = None,
+        session_id: str = "",
     ) -> AsyncGenerator[dict, None]:
         """
         Streaming handler. Yields SSE chunks:
@@ -364,6 +373,7 @@ class EveChatAgent(BaseAgent):
         {"type": "tool_result", "name": "...", "result": "..."}
         {"type": "done", "metadata": {...}}
         """
+        self._session_id = session_id
         # Guardrail
         if len(message) > MAX_INPUT_LENGTH:
             yield {"type": "token", "content": "Your message is too long. Please keep it shorter."}
@@ -393,12 +403,17 @@ class EveChatAgent(BaseAgent):
                 yield {"type": "done", "metadata": {"rounds": round_num + 1, "tool_calls": tool_calls_log}}
                 return
 
-            # Execute tools — tool_calls already contain extra_content with
-            # thought_signature if present (captured by llm.chat_stream)
+            # Strip extra_content (Gemini thought_signature) from tool calls
+            # before putting them in the message history — Gemini rejects
+            # unknown fields in subsequent requests (400 INVALID_ARGUMENT).
+            clean_tool_calls = [
+                {k: v for k, v in tc.items() if k != "extra_content"}
+                for tc in accumulated_tool_calls
+            ]
             assistant_msg = {
                 "role": "assistant",
                 "content": accumulated_content or None,
-                "tool_calls": accumulated_tool_calls,
+                "tool_calls": clean_tool_calls,
             }
             messages.append(assistant_msg)
 
@@ -522,6 +537,14 @@ class EveChatAgent(BaseAgent):
                 ),
             })
 
+        # Inject cross-session user memories
+        user_memories = state.get("_memories")
+        if user_memories:
+            from ...services.memory import format_memories_for_prompt
+            mem_block = format_memories_for_prompt(user_memories)
+            if mem_block:
+                messages.append({"role": "system", "content": mem_block})
+
         # Add conversation history (token-aware trimming)
         if history:
             trimmed = self._trim_history(history)
@@ -624,6 +647,7 @@ class EveChatAgent(BaseAgent):
                     db=db,
                     tenant_id=tenant_id,
                     user_id=user_id,
+                    session_id=getattr(self, "_session_id", ""),
                     _agent_state=state,
                     _brand=state.get("_brand"),
                 )

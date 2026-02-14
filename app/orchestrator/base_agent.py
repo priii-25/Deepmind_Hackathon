@@ -68,6 +68,7 @@ class BaseAgent:
         tenant_id: str,
         files: Optional[list] = None,
         history: Optional[list[dict]] = None,
+        session_id: str = "",
     ) -> AgentResponse:
         """
         Handle a user message. Must be implemented by subclass.

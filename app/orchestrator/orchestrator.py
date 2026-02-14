@@ -29,9 +29,11 @@ from .state import (
     get_recent_messages,
     build_history_with_media,
     maybe_summarize_history,
+    maybe_extract_memories,
 )
 from ..services import realtime
 from ..services.brand_context import get_brand_context
+from ..services.memory import load_memories
 
 logger = logging.getLogger(__name__)
 
@@ -83,10 +85,18 @@ async def handle_message(
     # 8. Maybe summarize old history (keeps context manageable)
     agent_state = await maybe_summarize_history(db, convo, history, agent_state)
 
+    # 8.1. Maybe extract persistent memories from conversation
+    await maybe_extract_memories(db, convo, history, tenant_id, user_id)
+
     # 8.5. Load brand context — available to ALL agents
     brand = await get_brand_context(db, tenant_id)
     if brand:
         agent_state["_brand"] = brand
+
+    # 8.6. Load cross-session user memories
+    memories = await load_memories(db, tenant_id, user_id)
+    if memories:
+        agent_state["_memories"] = memories
 
     # 9. Delegate to agent
     try:
@@ -98,6 +108,7 @@ async def handle_message(
             tenant_id=tenant_id,
             files=files,
             history=history,
+            session_id=session_id,
         )
     except Exception as e:
         logger.exception("Agent '%s' failed: %s", agent_name, e)
@@ -180,10 +191,18 @@ async def handle_message_stream(
     agent_state = await get_agent_state(convo)
     agent_state = await maybe_summarize_history(db, convo, history, agent_state)
 
+    # Extract persistent memories from conversation
+    await maybe_extract_memories(db, convo, history, tenant_id, user_id)
+
     # Load brand context for streaming path too
     brand = await get_brand_context(db, tenant_id)
     if brand:
         agent_state["_brand"] = brand
+
+    # Load cross-session user memories
+    memories = await load_memories(db, tenant_id, user_id)
+    if memories:
+        agent_state["_memories"] = memories
 
     # Inject uploaded file IDs so agents can access them
     if files:
@@ -202,6 +221,7 @@ async def handle_message_stream(
                 user_id=user_id,
                 tenant_id=tenant_id,
                 history=history,
+                session_id=session_id,
             ):
                 if chunk.get("type") == "token":
                     full_content += chunk.get("content", "")
@@ -245,6 +265,7 @@ async def handle_message_stream(
             response = await agent.handle(
                 message=message, state=agent_state, db=db,
                 user_id=user_id, tenant_id=tenant_id, history=history,
+                session_id=session_id,
             )
         except Exception as e:
             response = AgentResponse(content=f"Error: {e}", is_complete=True)

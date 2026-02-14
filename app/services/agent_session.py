@@ -17,7 +17,7 @@ from ..models.agent_session import AgentSession
 logger = logging.getLogger(__name__)
 
 # Keys to strip from persisted state (non-serializable or ephemeral)
-_EPHEMERAL_KEYS = {"_gemini_chat", "_brand"}
+_EPHEMERAL_KEYS = {"_gemini_chat", "_brand", "_past_shoots", "_memories"}
 
 
 def _clean_state(state: dict) -> dict:

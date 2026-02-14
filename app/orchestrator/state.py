@@ -251,3 +251,89 @@ async def maybe_summarize_history(
         # Non-fatal — conversation continues without summary
 
     return agent_state
+
+
+# ── Auto Memory Extraction ──────────────────────────────────────────
+# Every ~15 messages, extract persistent user facts from the conversation.
+
+MEMORY_EXTRACT_THRESHOLD = 15
+
+
+async def maybe_extract_memories(
+    db: AsyncSession,
+    convo: Conversation,
+    history: list[dict],
+    tenant_id: str,
+    user_id: str,
+) -> None:
+    """
+    Periodically extract persistent user facts from conversation history.
+    Saves them to UserMemory for cross-session recall.
+    """
+    if len(history) < MEMORY_EXTRACT_THRESHOLD:
+        return
+
+    # Check if we already extracted recently (use conversation state)
+    state = convo.state or {}
+    last_extract_at = state.get("_last_memory_extract_at", 0)
+    if len(history) - last_extract_at < MEMORY_EXTRACT_THRESHOLD:
+        return
+
+    try:
+        import json
+        from ..services.memory import save_memory
+
+        # Use recent messages for extraction
+        recent = history[-MEMORY_EXTRACT_THRESHOLD:]
+        text = "\n".join(
+            f"{m['role']}: {m['content'][:300]}" for m in recent if m.get("content")
+        )
+
+        extraction = await llm.chat_simple(
+            prompt=(
+                "Extract key PERSISTENT facts about the user from this conversation. "
+                "Only extract facts that would be useful across future sessions.\n\n"
+                "Return a JSON array of objects with {category, key, value}.\n"
+                "Categories: style_preference, product_info, personal_fact, project_context, agent_feedback\n"
+                "Keys should be short snake_case identifiers (e.g. product_type, preferred_style, target_audience).\n"
+                "Values should be concise (1-2 sentences max).\n\n"
+                "If there are NO persistent facts worth saving, return an empty array: []\n\n"
+                f"Conversation:\n{text}"
+            ),
+            system="You extract user facts from conversations. Return ONLY a valid JSON array, nothing else.",
+            temperature=0,
+            max_tokens=500,
+        )
+
+        # Parse the JSON response
+        extraction = extraction.strip()
+        if extraction.startswith("```"):
+            extraction = extraction.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+        facts = json.loads(extraction)
+        if not isinstance(facts, list):
+            return
+
+        saved = 0
+        for fact in facts[:10]:  # Cap at 10 per extraction
+            if all(k in fact for k in ("category", "key", "value")):
+                await save_memory(
+                    db, tenant_id, user_id,
+                    fact["category"], fact["key"], fact["value"],
+                    source="extracted",
+                )
+                saved += 1
+
+        # Mark extraction point
+        state["_last_memory_extract_at"] = len(history)
+        convo.state = state
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(convo, "state")
+        await db.flush()
+
+        if saved:
+            logger.info("Extracted %d memories from conversation %s", saved, convo.id)
+
+    except Exception as e:
+        logger.warning("Memory extraction failed: %s", e)
+        # Non-fatal — conversation continues without extraction

@@ -146,6 +146,9 @@ def init_tools() -> None:
     # ── Conversation history tool (cross-session memory) ─────────
     from . import conversation_history  # noqa: F401
 
+    # ── Memory tool (persistent user facts) ───────────────────────
+    from . import memory_tool  # noqa: F401
+
     logger.info(
         "Tools ready: %d tools [%s]",
         len(_tools),

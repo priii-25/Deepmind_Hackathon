@@ -100,13 +100,24 @@ async def _try_delegate(agent_name: str, task: str, db, tenant_id: str, **kwargs
         from ..orchestrator.state import build_history_with_media
         from sqlalchemy import select
 
-        # Find the most recent conversation for this tenant
-        conv_result = await db.execute(
-            select(Conversation)
-            .where(Conversation.tenant_id == tenant_id)
-            .order_by(Conversation.updated_at.desc())
-            .limit(1)
-        )
+        # Find the current conversation by session_id (preferred) or fallback to most recent
+        session_id = kwargs.get("session_id", "")
+        if session_id:
+            conv_result = await db.execute(
+                select(Conversation)
+                .where(
+                    Conversation.tenant_id == tenant_id,
+                    Conversation.session_id == session_id,
+                )
+                .limit(1)
+            )
+        else:
+            conv_result = await db.execute(
+                select(Conversation)
+                .where(Conversation.tenant_id == tenant_id)
+                .order_by(Conversation.updated_at.desc())
+                .limit(1)
+            )
         convo = conv_result.scalar_one_or_none()
         if convo:
             msg_result = await db.execute(
