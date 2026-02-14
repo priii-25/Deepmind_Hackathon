@@ -1,7 +1,7 @@
 """
-Notetaker agent (Ivy) — joins meetings via Meeting BaaS, transcribes, and summarizes.
+Notetaker agent (Ivy) — joins meetings via Meeting BaaS v2, transcribes, and summarizes.
 
-Pipeline: start → join_meeting → waiting (poll) → deliver
+Pipeline: start → join_meeting → waiting (poll status) → deliver
 """
 
 import logging
@@ -22,6 +22,11 @@ MEETING_URL_RE = re.compile(
     r"https?://(?:[\w-]+\.)?(?:zoom\.us|meet\.google\.com|teams\.microsoft\.com|teams\.live\.com)/\S+",
     re.IGNORECASE,
 )
+
+# Statuses that mean "bot is done, check for transcript"
+_COMPLETED_STATUSES = {"ended", "completed"}
+# Statuses that mean "still in meeting"
+_ACTIVE_STATUSES = {"joining", "in_waiting_room", "in_call", "in call", "recording"}
 
 
 class NotetakerAgent(BaseAgent):
@@ -107,7 +112,7 @@ class NotetakerAgent(BaseAgent):
     async def _do_join(
         self, meeting_url: str, state: dict, db: AsyncSession, user_id: str, tenant_id: str,
     ) -> AgentResponse:
-        """Call Meeting BaaS to send a bot into the meeting."""
+        """Call Meeting BaaS v2 to send a bot into the meeting."""
         if "zoom.us" in meeting_url:
             platform = "zoom"
         elif "meet.google" in meeting_url:
@@ -166,7 +171,10 @@ class NotetakerAgent(BaseAgent):
             )
 
     async def _poll_and_summarize(self, state: dict, db: AsyncSession) -> AgentResponse:
-        """Poll Meeting BaaS for transcript. If ready, summarize with Gemini."""
+        """
+        Poll Meeting BaaS v2 for bot status. If meeting is done, fetch
+        transcript from presigned S3 URL and summarize with Gemini.
+        """
         bot_id = state.get("bot_id")
         call_id = state.get("call_id")
 
@@ -178,11 +186,11 @@ class NotetakerAgent(BaseAgent):
                 status=AgentStatus.ERROR,
             )
 
-        # Poll Meeting BaaS
+        # 1. Lightweight status check first
         try:
-            data = await meetingbaas.get_meeting_data(bot_id)
+            status_data = await meetingbaas.get_bot_status(bot_id)
         except Exception as e:
-            logger.error("Failed to poll meeting data: %s", e)
+            logger.error("Failed to poll bot status: %s", e)
             return AgentResponse(
                 content=f"Couldn't check meeting status: {e}\n\nTry asking again in a moment.",
                 state_update=state,
@@ -190,10 +198,22 @@ class NotetakerAgent(BaseAgent):
                 status=AgentStatus.PROCESSING,
             )
 
-        if not data or not data.get("transcript"):
+        if not status_data:
+            return AgentResponse(
+                content="Couldn't find the meeting bot. It may have expired. Try starting a new session.",
+                state_update=self._complete(state),
+                is_complete=True,
+                status=AgentStatus.ERROR,
+            )
+
+        bot_status = status_data.get("status", "").lower()
+        logger.info("Notetaker: bot %s status=%s", bot_id, bot_status)
+
+        # 2. Still in meeting — tell user to wait
+        if bot_status in _ACTIVE_STATUSES:
             return AgentResponse(
                 content=(
-                    "The meeting is still in progress (or just ended and is being processed).\n\n"
+                    f"The bot is currently **{bot_status.replace('_', ' ')}**.\n\n"
                     "Ask me again once the meeting is over!"
                 ),
                 state_update=state,
@@ -201,17 +221,57 @@ class NotetakerAgent(BaseAgent):
                 status=AgentStatus.PROCESSING,
             )
 
-        # Transcript is ready — format it
-        transcript_parts = data["transcript"]
-        if isinstance(transcript_parts, list):
-            transcript_text = "\n".join(
-                f"{seg.get('speaker', 'Unknown')}: {seg.get('text', '')}"
-                for seg in transcript_parts
+        # 3. Failed
+        if bot_status == "failed":
+            if call_id:
+                result = await db.execute(select(Call).where(Call.id == call_id))
+                call = result.scalar_one_or_none()
+                if call:
+                    call.status = "failed"
+                    await db.commit()
+            return AgentResponse(
+                content="The meeting bot failed. The meeting may have ended before the bot could join, or access was denied.",
+                state_update=self._complete(state),
+                is_complete=True,
+                status=AgentStatus.ERROR,
             )
-        else:
-            transcript_text = str(transcript_parts)
 
-        # Save transcript to DB
+        # 4. Meeting ended/completed — fetch full details for transcript
+        try:
+            details = await meetingbaas.get_bot_details(bot_id)
+        except Exception as e:
+            logger.error("Failed to get bot details: %s", e)
+            return AgentResponse(
+                content=f"Meeting ended but couldn't retrieve data: {e}\n\nTry again in a moment.",
+                state_update=state,
+                is_complete=False,
+                status=AgentStatus.PROCESSING,
+            )
+
+        if not details:
+            return AgentResponse(
+                content="Meeting ended but data isn't available yet. Try again in a moment.",
+                state_update=state,
+                is_complete=False,
+                status=AgentStatus.PROCESSING,
+            )
+
+        # 5. Extract transcript — v2 provides a presigned S3 URL
+        transcript_text = await self._extract_transcript(details)
+
+        if not transcript_text:
+            return AgentResponse(
+                content=(
+                    "The meeting ended but the transcript isn't ready yet "
+                    "(transcription may still be processing).\n\n"
+                    "Ask me again in a minute!"
+                ),
+                state_update=state,
+                is_complete=False,
+                status=AgentStatus.PROCESSING,
+            )
+
+        # 6. Save transcript to DB
         if call_id:
             result = await db.execute(select(Call).where(Call.id == call_id))
             call = result.scalar_one_or_none()
@@ -219,7 +279,7 @@ class NotetakerAgent(BaseAgent):
                 call.transcript = transcript_text
                 call.status = "processing"
 
-        # Summarize with Gemini
+        # 7. Summarize with Gemini
         try:
             summary = await chat_simple(
                 prompt=(
@@ -237,7 +297,7 @@ class NotetakerAgent(BaseAgent):
             logger.error("Failed to summarize: %s", e)
             summary = "Couldn't generate summary, but transcript is available."
 
-        # Save summary to DB
+        # 8. Save summary to DB
         if call_id:
             result = await db.execute(select(Call).where(Call.id == call_id))
             call = result.scalar_one_or_none()
@@ -260,6 +320,77 @@ class NotetakerAgent(BaseAgent):
             needs_input="Full transcript or done?",
             status=AgentStatus.AWAITING_CONFIRMATION,
         )
+
+    async def _extract_transcript(self, details: dict) -> Optional[str]:
+        """
+        Extract transcript text from v2 bot details.
+
+        v2 provides transcript as a presigned S3 URL (key: "transcription")
+        or may include inline transcript data.
+        """
+        # Try presigned S3 URL first (v2 primary path)
+        transcript_url = details.get("transcription")
+        if transcript_url and isinstance(transcript_url, str) and transcript_url.startswith("http"):
+            segments = await meetingbaas.fetch_transcript(transcript_url)
+            if segments:
+                return self._format_segments(segments)
+
+        # Fallback: inline transcript array (v1-style, some endpoints still return this)
+        inline = details.get("transcript")
+        if inline:
+            if isinstance(inline, list):
+                return self._format_segments(inline)
+            return str(inline)
+
+        return None
+
+    @staticmethod
+    def _format_segments(segments: list[dict]) -> str:
+        """Format transcript segments into readable text.
+
+        Handles multiple formats:
+        - {"speaker": "X", "text": "..."} (standard)
+        - {"speaker": "X", "words": [{"word": "..."}]} (word-level)
+        - {"speaker": 0, "transcription": "..."} (Gladia)
+        - {"channel": "X", "alternatives": [{"transcript": "..."}]} (some STT providers)
+        """
+        lines = []
+        for seg in segments:
+            speaker = seg.get("speaker", seg.get("channel", "Unknown"))
+            if isinstance(speaker, int):
+                speaker = f"Speaker {speaker}"
+
+            # Try multiple text field names
+            text = (
+                seg.get("text")
+                or seg.get("transcription")
+                or seg.get("transcript")
+                or seg.get("content")
+                or seg.get("words")
+            )
+
+            # Nested alternatives format (e.g. Google STT)
+            if not text and "alternatives" in seg:
+                alts = seg["alternatives"]
+                if isinstance(alts, list) and alts:
+                    text = alts[0].get("transcript", "")
+
+            # If text is a list of word objects, join them
+            if isinstance(text, list):
+                text = " ".join(
+                    w.get("word", w.get("text", "")) if isinstance(w, dict) else str(w)
+                    for w in text
+                )
+
+            if text:
+                lines.append(f"{speaker}: {text}")
+
+        if not lines:
+            # Last resort: dump raw segment data
+            logger.warning("Could not extract text from %d segments, dumping raw", len(segments))
+            return "\n".join(str(seg) for seg in segments[:50])
+
+        return "\n".join(lines)
 
     async def _deliver(self, message: str, state: dict, db: AsyncSession) -> AgentResponse:
         """Show full transcript if asked, then complete."""

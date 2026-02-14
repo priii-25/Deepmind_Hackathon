@@ -230,6 +230,10 @@ def _get_fallback_provider(primary: str) -> Optional[str]:
 
 # ── Streaming ────────────────────────────────────────────────────────
 
+STREAM_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+STREAM_FALLBACK_MODEL = "gemini-2.5-flash"
+
+
 async def chat_stream(
     messages: list[dict],
     model: Optional[str] = None,
@@ -238,8 +242,16 @@ async def chat_stream(
     tools: Optional[list[dict]] = None,
 ) -> AsyncGenerator[dict, None]:
     """
-    Streaming chat completion. Yields SSE chunks as dicts.
-    Each chunk has: {"content": str, "done": bool, "tool_calls": list|None}
+    Streaming chat completion with retry and model fallback.
+
+    Strategy:
+      1. Try with the requested model (default: gemini-3-flash-preview).
+      2. On transient failure (429/5xx), retry ONCE after a short delay.
+      3. If retry also fails, fallback to gemini-2.5-flash (no thinking mode,
+         no thought_signature issues) for THIS REQUEST ONLY.
+      4. The default model is never changed — fallback is per-request.
+
+    Yields: {"content": str, "done": bool, "tool_calls": list|None}
     """
     settings = get_settings()
     base_url, api_key, default_model = _get_provider_config()
@@ -248,8 +260,79 @@ async def chat_stream(
         yield {"content": "LLM not configured.", "done": True, "tool_calls": None}
         return
 
+    resolved_model = model or default_model
+
+    # ── Attempt 1: primary model ────────────────────────────────────
+    chunks_or_error = await _stream_with_collect(
+        base_url, api_key, resolved_model, messages, temperature, max_tokens, tools, settings,
+    )
+    if not isinstance(chunks_or_error, Exception):
+        for chunk in chunks_or_error:
+            yield chunk
+        return
+
+    primary_error = chunks_or_error
+    logger.warning("LLM stream attempt 1 failed (%s): %s", resolved_model, primary_error)
+
+    # ── Attempt 2: retry same model after delay ─────────────────────
+    delay = 1.0 + random.uniform(0, 0.5)
+    logger.info("LLM stream: retrying %s in %.1fs", resolved_model, delay)
+    await asyncio.sleep(delay)
+
+    chunks_or_error = await _stream_with_collect(
+        base_url, api_key, resolved_model, messages, temperature, max_tokens, tools, settings,
+    )
+    if not isinstance(chunks_or_error, Exception):
+        for chunk in chunks_or_error:
+            yield chunk
+        return
+
+    retry_error = chunks_or_error
+    logger.warning("LLM stream attempt 2 failed (%s): %s", resolved_model, retry_error)
+
+    # ── Attempt 3: fallback to stable model (single attempt) ────────
+    if resolved_model != STREAM_FALLBACK_MODEL:
+        logger.info("LLM stream: falling back to %s (no thinking)", STREAM_FALLBACK_MODEL)
+        chunks_or_error = await _stream_with_collect(
+            base_url, api_key, STREAM_FALLBACK_MODEL, messages,
+            temperature, max_tokens, tools, settings,
+            extra_params={"reasoning_effort": "none"},
+        )
+        if not isinstance(chunks_or_error, Exception):
+            for chunk in chunks_or_error:
+                yield chunk
+            return
+
+        logger.error("LLM stream fallback also failed: %s", chunks_or_error)
+
+    yield {
+        "content": "The AI service is temporarily unavailable. Please try again in a moment.",
+        "done": True,
+        "tool_calls": None,
+    }
+
+
+async def _stream_with_collect(
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict],
+    temperature: Optional[float],
+    max_tokens: Optional[int],
+    tools: Optional[list[dict]],
+    settings: Any,
+    extra_params: Optional[dict] = None,
+) -> list[dict] | Exception:
+    """
+    Execute a single streaming request and collect all chunks.
+
+    Returns list[dict] on success (the SSE chunks to yield to caller),
+    or an Exception on failure. This two-phase pattern lets the caller
+    decide whether to retry or fallback before yielding anything to the
+    upstream consumer (important: once you yield a token, you can't un-yield it).
+    """
     payload: dict[str, Any] = {
-        "model": model or default_model,
+        "model": model,
         "messages": messages,
         "temperature": temperature if temperature is not None else settings.default_llm_temperature,
         "max_tokens": max_tokens or settings.default_llm_max_tokens,
@@ -257,6 +340,8 @@ async def chat_stream(
     }
     if tools:
         payload["tools"] = tools
+    if extra_params:
+        payload.update(extra_params)
 
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {
@@ -265,52 +350,54 @@ async def chat_stream(
     }
 
     client = _get_client()
-    accumulated_tool_calls = {}
-    chunk_count = 0
+    accumulated_tool_calls: dict[int, dict] = {}
+    chunks: list[dict] = []
     total_content = ""
-    thought_signature = None  # Gemini thinking models require this echoed back
 
     logger.info("LLM stream start: model=%s messages=%d tools=%d",
-                payload["model"], len(messages), len(tools) if tools else 0)
+                model, len(messages), len(tools) if tools else 0)
 
     try:
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
+            if resp.status_code in STREAM_RETRYABLE_STATUS:
+                error_body = await resp.aread()
+                error_text = error_body.decode("utf-8", errors="replace")[:500]
+                logger.warning("LLM stream %d (model=%s): %s",
+                               resp.status_code, model, error_text)
+                return httpx.HTTPStatusError(
+                    f"{resp.status_code}", request=resp.request, response=resp,
+                )
+
             if resp.status_code >= 400:
                 error_body = await resp.aread()
                 error_text = error_body.decode("utf-8", errors="replace")[:500]
-                logger.error(
-                    "LLM stream error %d from %s (model=%s): %s",
-                    resp.status_code, url, payload["model"], error_text,
+                logger.error("LLM stream error %d (model=%s): %s",
+                             resp.status_code, model, error_text)
+                return httpx.HTTPStatusError(
+                    f"{resp.status_code}", request=resp.request, response=resp,
                 )
-                resp.raise_for_status()
 
-            logger.info("LLM stream connected: %d", resp.status_code)
+            logger.info("LLM stream connected: model=%s", model)
 
             async for line in resp.aiter_lines():
                 if not line.startswith("data: "):
                     continue
+
                 data_str = line[6:]
                 if data_str.strip() == "[DONE]":
-                    logger.info("LLM stream done: %d chunks, %d chars content",
-                                chunk_count, len(total_content))
-                    yield {"content": "", "done": True, "tool_calls": None}
-                    return
+                    logger.info("LLM stream done: model=%s content=%d chars",
+                                model, len(total_content))
+                    chunks.append({"content": "", "done": True, "tool_calls": None})
+                    return chunks
 
                 try:
                     chunk = json.loads(data_str)
                 except json.JSONDecodeError:
-                    logger.warning("LLM stream: bad JSON chunk: %s", data_str[:200])
                     continue
 
-                chunk_count += 1
                 delta = chunk.get("choices", [{}])[0].get("delta", {})
 
-                # Capture Gemini thought signature from delta-level (some models)
-                extra = delta.get("extra_content", {})
-                if extra.get("google", {}).get("thought_signature"):
-                    thought_signature = extra["google"]["thought_signature"]
-
-                # Handle streamed tool calls
+                # ── Accumulate tool calls ──────────────────────────
                 if delta.get("tool_calls"):
                     for tc in delta["tool_calls"]:
                         idx = tc.get("index", 0)
@@ -328,45 +415,50 @@ async def chat_stream(
                             logger.info("LLM stream: tool_call → %s", func["name"])
                         if func.get("arguments"):
                             accumulated_tool_calls[idx]["function"]["arguments"] += func["arguments"]
-                        # Capture thought_signature from inside tool call (Gemini 3 thinking models)
-                        tc_extra = tc.get("extra_content", {})
-                        if tc_extra.get("google", {}).get("thought_signature"):
+
+                        # Gemini 3 thinking models: thought_signature inside each tool_call
+                        tc_extra = tc.get("extra_content")
+                        if tc_extra:
                             accumulated_tool_calls[idx]["extra_content"] = tc_extra
-                            thought_signature = tc_extra["google"]["thought_signature"]
-                            logger.info("LLM stream: captured thought_signature")
 
+                # ── Accumulate content ─────────────────────────────
                 content = delta.get("content", "")
-                finish = chunk.get("choices", [{}])[0].get("finish_reason")
-
                 if content:
                     total_content += content
-                    yield {"content": content, "done": False, "tool_calls": None}
+                    chunks.append({"content": content, "done": False, "tool_calls": None})
+
+                # ── Handle finish ──────────────────────────────────
+                finish = chunk.get("choices", [{}])[0].get("finish_reason")
 
                 if finish == "tool_calls" or (finish == "stop" and accumulated_tool_calls):
-                    # Gemini compat layer sends finish_reason="stop" even with tool calls
-                    tool_names = [tc["function"]["name"] for tc in accumulated_tool_calls.values()]
-                    logger.info("LLM stream finish: tool_calls=%s thought_sig=%s",
-                                tool_names, bool(thought_signature))
-                    yield {
+                    tool_names = [t["function"]["name"] for t in accumulated_tool_calls.values()]
+                    logger.info("LLM stream finish: tool_calls=%s model=%s", tool_names, model)
+                    chunks.append({
                         "content": "",
                         "done": True,
                         "tool_calls": list(accumulated_tool_calls.values()),
-                        "thought_signature": thought_signature,
-                    }
-                    return
+                    })
+                    return chunks
                 elif finish == "stop":
-                    logger.info("LLM stream finish: stop | content=%d chars", len(total_content))
-                    yield {"content": "", "done": True, "tool_calls": None}
-                    return
-                elif finish:
-                    logger.info("LLM stream finish: %s", finish)
+                    logger.info("LLM stream finish: stop | model=%s content=%d chars",
+                                model, len(total_content))
+                    chunks.append({"content": "", "done": True, "tool_calls": None})
+                    return chunks
 
-    except httpx.HTTPStatusError as e:
-        logger.error("Stream HTTP error: %s", e)
-        yield {"content": f"LLM error ({e.response.status_code}). Check API key and model access.", "done": True, "tool_calls": None}
+        # Stream ended without [DONE] or finish_reason — unusual but handle gracefully
+        if chunks:
+            chunks.append({"content": "", "done": True, "tool_calls": None})
+            return chunks
+        return RuntimeError("Stream ended without any data")
+
+    except httpx.HTTPStatusError:
+        raise  # Already handled above, won't reach here
+    except (httpx.TimeoutException, httpx.ConnectError, OSError) as e:
+        logger.warning("LLM stream network error (model=%s): %s", model, e)
+        return e
     except Exception as e:
-        logger.error("Stream failed: %s", e)
-        yield {"content": f"Streaming error: {e}", "done": True, "tool_calls": None}
+        logger.error("LLM stream unexpected error (model=%s): %s", model, e)
+        return e
 
 
 # ── Convenience functions ────────────────────────────────────────────
