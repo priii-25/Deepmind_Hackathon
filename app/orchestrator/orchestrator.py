@@ -264,8 +264,8 @@ async def handle_message_stream(
         try:
             response = await agent.handle(
                 message=message, state=agent_state, db=db,
-                user_id=user_id, tenant_id=tenant_id, history=history,
-                session_id=session_id,
+                user_id=user_id, tenant_id=tenant_id, files=files,
+                history=history, session_id=session_id,
             )
         except Exception as e:
             response = AgentResponse(content=f"Error: {e}", is_complete=True)

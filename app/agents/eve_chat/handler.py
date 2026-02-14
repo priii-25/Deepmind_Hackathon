@@ -305,10 +305,12 @@ class EveChatAgent(BaseAgent):
                 )
 
             # ── Process tool calls in parallel ────────────────────
-            # Strip any non-standard fields from tool calls before appending
+            # Keep only standard fields + extra_content (Gemini 3 thought_signature).
+            # Gemini 3 Flash/Pro REQUIRE thought_signature to be passed back
+            # during function calling, otherwise the API returns 400.
             if assistant_msg.get("tool_calls"):
                 assistant_msg["tool_calls"] = [
-                    {k: v for k, v in tc.items() if k in ("id", "type", "function")}
+                    {k: v for k, v in tc.items() if k in ("id", "type", "function", "extra_content")}
                     for tc in assistant_msg["tool_calls"]
                 ]
             messages.append(assistant_msg)
@@ -406,17 +408,14 @@ class EveChatAgent(BaseAgent):
                 yield {"type": "done", "metadata": {"rounds": round_num + 1, "tool_calls": tool_calls_log}}
                 return
 
-            # Strip extra_content (Gemini thought_signature) from tool calls
-            # before putting them in the message history — Gemini rejects
-            # unknown fields in subsequent requests (400 INVALID_ARGUMENT).
-            clean_tool_calls = [
-                {k: v for k, v in tc.items() if k != "extra_content"}
-                for tc in accumulated_tool_calls
-            ]
+            # Keep extra_content (Gemini 3 thought_signature) in tool calls.
+            # Gemini 3 Flash/Pro REQUIRE thought_signature to be passed back
+            # during function calling — stripping it causes 400 errors.
+            # See: https://ai.google.dev/gemini-api/docs/thought-signatures
             assistant_msg = {
                 "role": "assistant",
                 "content": accumulated_content or None,
-                "tool_calls": clean_tool_calls,
+                "tool_calls": accumulated_tool_calls,
             }
             messages.append(assistant_msg)
 

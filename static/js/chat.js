@@ -887,51 +887,95 @@ function handleFileSelect(e) {
 }
 
 async function handleFiles(files) {
+  const ALLOWED_TYPES = ['image/', 'video/'];
+  const MAX_BASE64_SIZE = 20 * 1024 * 1024;  // 20MB — use base64 for small files
+  // Videos and large files use multipart upload
+
   for (const file of Array.from(files)) {
-    if (!file.type.startsWith('image/')) {
-      showUploadStatus('Please select an image file', true);
+    const isAllowed = ALLOWED_TYPES.some(t => file.type.startsWith(t));
+    if (!isAllowed) {
+      showUploadStatus('Please select an image or video file', true);
       continue;
     }
 
+    const isVideo = file.type.startsWith('video/');
+    const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+
     // Show immediate feedback
-    showUploadStatus('Reading file...');
+    showUploadStatus(isVideo ? `Uploading video (${sizeMB} MB)...` : 'Reading file...');
 
     try {
-      const base64Data = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = () => reject(new Error('Could not read file'));
-        reader.readAsDataURL(file);
-      });
+      let result;
 
-      showUploadStatus('Uploading...');
+      if (isVideo || file.size > MAX_BASE64_SIZE) {
+        // ── Multipart upload for videos and large files ────────
+        showUploadStatus(`Uploading ${isVideo ? 'video' : 'file'} (${sizeMB} MB)...`);
 
-      // Upload to server
-      const resp = await fetch(`${API_BASE}/v1/upload`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Tenant-ID': 'dev-tenant',
-          'X-User-ID': 'dev-user',
-        },
-        body: JSON.stringify({ data: base64Data, filename: file.name }),
-      });
+        const formData = new FormData();
+        formData.append('file', file);
 
-      if (!resp.ok) {
-        const errText = await resp.text().catch(() => resp.status);
-        throw new Error(`Upload failed (${resp.status}): ${errText}`);
+        const resp = await fetch(`${API_BASE}/v1/upload/file`, {
+          method: 'POST',
+          headers: {
+            'X-Tenant-ID': 'dev-tenant',
+            'X-User-ID': 'dev-user',
+          },
+          body: formData,
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => resp.status);
+          throw new Error(`Upload failed (${resp.status}): ${errText}`);
+        }
+
+        result = await resp.json();
+
+      } else {
+        // ── Base64 upload for small images ─────────────────────
+        const base64Data = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error('Could not read file'));
+          reader.readAsDataURL(file);
+        });
+
+        showUploadStatus('Uploading...');
+
+        const resp = await fetch(`${API_BASE}/v1/upload`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Tenant-ID': 'dev-tenant',
+            'X-User-ID': 'dev-user',
+          },
+          body: JSON.stringify({ data: base64Data, filename: file.name }),
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => resp.status);
+          throw new Error(`Upload failed (${resp.status}): ${errText}`);
+        }
+
+        result = await resp.json();
       }
 
-      const result = await resp.json();
-      console.log('[Upload] Attachment uploaded:', result.file_id);
+      console.log('[Upload] Attachment uploaded:', result.file_id, result.filename);
 
-      pendingFiles.push({ id: result.file_id, data: base64Data, name: file.name, url: result.url });
+      // Use a data URL preview for images, or a placeholder for videos
+      const previewData = isVideo ? null : await getBase64Preview(file);
+      pendingFiles.push({
+        id: result.file_id,
+        data: previewData,
+        name: file.name,
+        url: result.url,
+        isVideo: isVideo,
+      });
       renderUploadPreviews();
       hideUploadStatus();
 
       // Auto-send — set the message and send
       if (!$input.value.trim()) {
-        $input.value = "Here's my uploaded image";
+        $input.value = isVideo ? "Here's my video" : "Here's my uploaded image";
       }
 
       // If currently streaming, wait for it to finish before sending
@@ -951,6 +995,17 @@ async function handleFiles(files) {
       console.error('[Upload] Attachment upload failed:', err);
       showUploadStatus('Upload failed: ' + err.message, true);
     }
+  }
+
+  // Helper: get base64 preview for images (not used for videos)
+  function getBase64Preview(file) {
+    return new Promise((resolve) => {
+      if (!file.type.startsWith('image/')) { resolve(null); return; }
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(file);
+    });
   }
 }
 
@@ -975,11 +1030,19 @@ function hideUploadStatus() {
 }
 
 function renderUploadPreviews() {
-  $uploadPreview.innerHTML = pendingFiles.map((f, i) => `
-    <div class="preview-item">
+  $uploadPreview.innerHTML = pendingFiles.map((f, i) => {
+    if (f.isVideo) {
+      return `<div class="preview-item" style="display:flex;align-items:center;gap:6px;padding:4px 10px;background:rgba(255,255,255,0.08);border-radius:8px;">
+        <span style="font-size:20px;">🎬</span>
+        <span style="font-size:12px;opacity:0.8;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${f.name}</span>
+        <button class="remove" onclick="removeFile(${i})">×</button>
+      </div>`;
+    }
+    return `<div class="preview-item">
       <img src="${f.data}" alt="${f.name}"/>
       <button class="remove" onclick="removeFile(${i})">×</button>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 function removeFile(i) {

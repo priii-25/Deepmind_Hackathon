@@ -196,12 +196,18 @@ class SocialMediaAgent(BaseAgent):
         """Collect video file path and basic description."""
         upload_data = state.get("upload", {})
 
+        # Also check _pending_files from orchestrator state (streaming path)
+        all_files = list(files or [])
+        pending = state.get("_pending_files", [])
+        if pending:
+            all_files.extend(pending)
+
         # Check for files passed in
-        if files:
-            video_file = _find_video_file(files)
+        if all_files:
+            video_file = _resolve_video_file(all_files, tenant_id)
             if video_file:
                 upload_data["video_path"] = video_file
-                logger.info("Video file provided: %s", video_file)
+                logger.info("Video file resolved: %s", video_file)
 
         # Check if message references a file
         if not upload_data.get("video_path"):
@@ -724,16 +730,65 @@ async def _read_video_file(path: str, tenant_id: str) -> bytes:
     )
 
 
-def _find_video_file(files: list) -> Optional[str]:
-    """Find a video file from the files list."""
+def _resolve_video_file(files: list, tenant_id: str) -> Optional[str]:
+    """
+    Resolve a video file from the files list.
+
+    Handles:
+      - Full paths: "local_storage/dev-tenant/uploads/abc123.mp4"
+      - Bare file IDs from the upload endpoint: "abc123" or "abc123.mp4"
+
+    Looks up local storage to find the actual file.
+    """
     video_extensions = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv", ".m4v"}
+
     for f in files:
-        f_str = str(f)
-        ext = Path(f_str).suffix.lower()
-        if ext in video_extensions:
+        f_str = str(f).strip()
+        if not f_str:
+            continue
+
+        # If it already has a video extension and exists, use it directly
+        if Path(f_str).suffix.lower() in video_extensions and Path(f_str).exists():
             return f_str
-    # If no video extension match, return the first file (might be a video with no extension)
+
+        # Try as a bare file ID — search local storage for matching file
+        resolved = _resolve_file_id(f_str, tenant_id)
+        if resolved:
+            return resolved
+
+        # If it has a video extension but doesn't exist at that path, try resolving
+        if Path(f_str).suffix.lower() in video_extensions:
+            stem = Path(f_str).stem
+            resolved = _resolve_file_id(stem, tenant_id)
+            if resolved:
+                return resolved
+            return f_str  # Return as-is, _read_video_file will try harder
+
+    # Last resort: return first file as-is
     return str(files[0]) if files else None
+
+
+def _resolve_file_id(file_id: str, tenant_id: str) -> Optional[str]:
+    """
+    Resolve a bare file ID (e.g. "712ac4c00941") to the actual file path
+    by searching the local storage upload directory.
+    """
+    search_dirs = [
+        Path("local_storage") / tenant_id / "uploads",
+        Path("local_storage") / tenant_id,
+        Path(f"./local_storage/{tenant_id}/uploads"),
+    ]
+
+    for search_dir in search_dirs:
+        if not search_dir.exists():
+            continue
+        # Look for files matching this ID (with any extension)
+        for path in search_dir.iterdir():
+            if path.stem == file_id:
+                logger.info("Resolved file ID '%s' → %s", file_id, path)
+                return str(path)
+
+    return None
 
 
 def _extract_file_path(message: str, tenant_id: str) -> Optional[str]:
