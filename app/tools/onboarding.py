@@ -39,7 +39,8 @@ STAGE_DESCRIPTIONS = {
         "- At the start of a new conversation to check if onboarding is needed "
         "- To know which stage the user is in "
         "- To resume an interrupted onboarding flow "
-        "\n\nReturns: Current stage, brand info if fetched, selected teammates, integrations."
+        "\n\nReturns: Current stage, brand info if fetched, selected teammates, integrations, "
+        "and existing social media connections (YouTube, etc.)."
     ),
     parameters={
         "type": "object",
@@ -50,7 +51,7 @@ STAGE_DESCRIPTIONS = {
     category="onboarding",
 )
 async def get_onboarding_state_tool(db=None, tenant_id: str = "", **kwargs) -> str:
-    """Get onboarding state."""
+    """Get onboarding state, including existing social connections."""
     if not db:
         return "Error: No database session."
 
@@ -88,6 +89,30 @@ async def get_onboarding_state_tool(db=None, tenant_id: str = "", **kwargs) -> s
         idx = STAGES.index(state.current_stage) if state.current_stage in STAGES else 0
         parts.append(f"Stage {idx + 1} of {len(STAGES)}")
         parts.append(f"What to do now: {STAGE_DESCRIPTIONS.get(state.current_stage, '')}")
+
+    # ── Check existing social media connections ───────────────────
+    try:
+        from ..models.social_media import SocialToken
+        token_result = await db.execute(
+            select(SocialToken).where(
+                SocialToken.tenant_id == tenant_id,
+                SocialToken.user_id == user_id,
+            )
+        )
+        tokens = list(token_result.scalars().all())
+        if tokens:
+            parts.append("\nExisting social connections:")
+            for t in tokens:
+                meta = t.token_metadata or {}
+                channel = meta.get("channel_title", "")
+                label = f"  - {t.platform.upper()}: CONNECTED"
+                if channel:
+                    label += f" (channel: {channel})"
+                parts.append(label)
+        else:
+            parts.append("\nNo social media accounts connected yet.")
+    except Exception as e:
+        logger.debug("Could not check social connections: %s", e)
 
     return "\n".join(parts)
 
