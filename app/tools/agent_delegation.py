@@ -255,26 +255,27 @@ CHAD_UPSELL = """[TEEM_MATE_UPSELL]
 name: Chad
 role: Social Media Manager
 status: not_yet_active
-pitch: Chad is your Social Media Manager. He runs the social engine: strategy, scheduling, captions, posting, and performance tracking.
+pitch: Chad is your Social Media Manager. He handles the full YouTube publishing pipeline — from connecting your account to uploading and optimizing your videos.
 capabilities:
-- Weekly content plans with content pillars tailored to your industry
-- Post scheduling and publishing across Instagram, TikTok, LinkedIn, X, YouTube Shorts
-- Caption writing in your brand voice with hashtag strategy
-- Community management: responding to comments and DMs
-- Performance tracking: surfaces what works and recommends what to double down on
-- Repurposes one asset into multiple platform-native posts
-workflow: Chad starts by reviewing your brand positioning and suggesting the right platforms, posting rhythm, and content pillars. He then creates a weekly plan you approve. From there, he handles scheduling, captions, and tracking.
-sample_offer: Want me to bring Chad onto your team? He can start by analyzing your brand and recommending a social strategy.
+- YouTube account connection via Google OAuth
+- Video upload to YouTube with resumable upload (handles any file size)
+- AI-powered title, description, and tag generation (SEO-optimized)
+- Privacy control: public, unlisted, or private
+- Category selection for proper YouTube classification
+- Post-upload status monitoring
+- Works with videos from Kai (UGC) or your own uploads
+workflow: Chad connects to your YouTube account, takes your video, uses AI to generate the perfect title, description, and tags, then uploads it directly. You review everything before it goes live.
+sample_offer: Want me to bring Chad onto your team? He can connect your YouTube account and help you publish your first video in minutes.
 [/TEEM_MATE_UPSELL]"""
 
 @tool(
     name="agent_social_media",
     description=(
-        "Delegate to Chad, the Social Media Manager. Chad handles social strategy, "
-        "content planning, scheduling, captions, posting, and performance tracking. "
-        "\n\nWhen to use: User wants to post content, plan social media, schedule posts, "
-        "create captions, manage social accounts, or track social performance. "
-        "\n\nProvide: Platform, content type, caption style, scheduling needs."
+        "Delegate to Chad, the Social Media Manager. Chad uploads and publishes videos "
+        "to YouTube with AI-generated titles, descriptions, and tags. "
+        "\n\nWhen to use: User wants to upload a video to YouTube, publish content, "
+        "post to YouTube, share a video, manage their YouTube channel, or mentions YouTube. "
+        "\n\nProvide: What video to upload, topic/description, and any preferences."
     ),
     parameters={
         "type": "object",

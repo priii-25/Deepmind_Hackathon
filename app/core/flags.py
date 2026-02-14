@@ -66,7 +66,8 @@ class FeatureFlags(BaseSettings):
     # Requires: AIML_API_KEY
 
     enable_social_media: bool = Field(default=True, alias="FF_ENABLE_SOCIAL_MEDIA")
-    # Requires: TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET
+    # YouTube video upload + publishing.
+    # Requires: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, YOUTUBE_REDIRECT_URI
 
     enable_presentation: bool = Field(default=True, alias="FF_ENABLE_PRESENTATION")
     # Requires: SLIDESPEAK_API_KEY

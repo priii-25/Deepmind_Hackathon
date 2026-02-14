@@ -66,13 +66,13 @@ class Settings(BaseSettings):
     elevenlabs_api_key: str = Field(default="", alias="ELEVENLABS_API_KEY")
     lipsync_api_key: str = Field(default="", alias="LIPSYNC_API_KEY")
 
-    # --- Social Media ---
-    tiktok_client_key: str = Field(default="", alias="TIKTOK_CLIENT_KEY")
-    tiktok_client_secret: str = Field(default="", alias="TIKTOK_CLIENT_SECRET")
-    tiktok_redirect_uri: str = Field(default="", alias="TIKTOK_REDIRECT_URI")
-    facebook_app_id: str = Field(default="", alias="FACEBOOK_APP_ID")
-    facebook_app_secret: str = Field(default="", alias="FACEBOOK_APP_SECRET")
-    facebook_redirect_uri: str = Field(default="", alias="FACEBOOK_REDIRECT_URI")
+    # --- Social Media (YouTube) ---
+    # YouTube uses Google OAuth — shares GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
+    # with the notetaker. Just needs a separate redirect URI for YouTube OAuth.
+    youtube_redirect_uri: str = Field(
+        default="http://localhost:8000/v1/youtube/callback",
+        alias="YOUTUBE_REDIRECT_URI",
+    )
 
     # --- Presentation ---
     slidespeak_api_key: str = Field(default="", alias="SLIDESPEAK_API_KEY")
