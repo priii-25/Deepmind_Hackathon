@@ -76,3 +76,5 @@ plan.md
 readme.md 
 
 /ui
+
+*.db
