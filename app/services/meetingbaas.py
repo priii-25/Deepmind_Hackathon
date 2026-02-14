@@ -187,18 +187,20 @@ async def fetch_transcript(transcript_url: str) -> Optional[list[dict]]:
         )
         # Try common wrapper keys in priority order
         for key in ("segments", "transcript", "transcription", "prediction",
-                     "results", "utterances", "entries", "data"):
-            if key in data and isinstance(data[key], list):
-                logger.info("Meeting BaaS: using transcript key '%s' (%d items)", key, len(data[key]))
-                return data[key]
-
-        # Gladia nested format: prediction > transcription > utterances
-        if "prediction" in data and isinstance(data["prediction"], dict):
-            pred = data["prediction"]
-            for key in ("utterances", "transcription", "segments"):
-                if key in pred and isinstance(pred[key], list):
-                    logger.info("Meeting BaaS: using prediction.%s (%d items)", key, len(pred[key]))
-                    return pred[key]
+                     "result", "results", "utterances", "entries", "data"):
+            val = data.get(key)
+            if isinstance(val, list):
+                logger.info("Meeting BaaS: using transcript key '%s' (%d items)", key, len(val))
+                return val
+            # result/prediction can be a nested dict containing the actual segments
+            if isinstance(val, dict):
+                logger.info("Meeting BaaS: '%s' is a dict, keys=%s — drilling down", key, list(val.keys()))
+                for subkey in ("utterances", "segments", "transcription", "transcript",
+                               "results", "entries", "words"):
+                    subval = val.get(subkey)
+                    if isinstance(subval, list):
+                        logger.info("Meeting BaaS: using %s.%s (%d items)", key, subkey, len(subval))
+                        return subval
 
         # Last resort: return the whole dict as a single "segment" so the
         # handler can still show something rather than nothing
