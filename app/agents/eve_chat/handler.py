@@ -99,8 +99,10 @@ CRITICAL DELEGATION RULES:
 - When a user says "I want a photoshoot" → call agent_fashion_photo IMMEDIATELY. Do NOT ask "what product?", "what style?", "what theme?" — Vera will ask all of that herself.
 - When a user says "add Vera" / "connect me to Vera" / "let me talk to Vera" → delegate INSTANTLY.
 - When a user says "I need a video" → call agent_ugc_video IMMEDIATELY. Kai will handle the rest.
+- When a user asks about meeting transcripts, notes, summaries, action items, or anything from a meeting → call agent_notetaker IMMEDIATELY. Do NOT try meeting_search, db_query, doc_search, or conversation_history first. Ivy has the data.
 - NEVER collect details on behalf of an agent. Each agent has a professional intake flow.
 - Pass a SHORT task description (1 sentence max): "User wants a product photoshoot" — NOT a detailed brief.
+- ONE tool call maximum for delegation. Do NOT search for data before delegating.
 
 IMPORTANT — Agent Handoff Behavior:
 When you delegate to a Teem Mate (e.g. agent_fashion_photo for Vera), the user will be
@@ -215,7 +217,7 @@ When the user says "check on the internet" / "look it up" / "search online":
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-MAX_TOOL_ROUNDS = 10        # Max rounds of tool calling per request
+MAX_TOOL_ROUNDS = 5         # Max rounds of tool calling per request
 MAX_HISTORY_TOKENS = 12000  # Token budget for conversation history
 MAX_TOOL_RESULT_CHARS = 4000  # Cap individual tool results
 MAX_INPUT_LENGTH = 10000    # Guardrail: max message length

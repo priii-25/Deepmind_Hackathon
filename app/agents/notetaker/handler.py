@@ -63,6 +63,8 @@ class NotetakerAgent(BaseAgent):
             return await self._start(message, state, db, user_id, tenant_id)
         elif step == "join_meeting":
             return await self._join_meeting(message, state, db, user_id, tenant_id)
+        elif step == "select_meeting":
+            return await self._select_meeting(message, state, db)
         elif step == "waiting":
             return await self._poll_and_summarize(state, db)
         elif step == "deliver":
@@ -73,11 +75,23 @@ class NotetakerAgent(BaseAgent):
     async def _start(
         self, message: str, state: dict, db: AsyncSession, user_id: str, tenant_id: str,
     ) -> AgentResponse:
-        """Parse meeting link from message or ask for one."""
+        """Parse meeting link from message, check for past meetings, or ask for a link."""
+        # 1. If there's a meeting URL, join it
         match = MEETING_URL_RE.search(message)
         if match:
             return await self._do_join(match.group(0), state, db, user_id, tenant_id)
 
+        # 2. If user is asking about past meetings/transcripts, look them up
+        msg_lower = message.lower()
+        wants_past = any(w in msg_lower for w in [
+            "transcript", "summary", "notes", "last meeting", "older meeting",
+            "previous meeting", "past meeting", "history", "action item",
+            "what did we discuss", "what happened in",
+        ])
+        if wants_past:
+            return await self._lookup_past_meetings(message, state, db, tenant_id)
+
+        # 3. Default: offer to join a new meeting
         new_state = self._set_step(state, "join_meeting", AgentStatus.COLLECTING_INPUT)
         return AgentResponse(
             content=(
@@ -94,20 +108,149 @@ class NotetakerAgent(BaseAgent):
             status=AgentStatus.COLLECTING_INPUT,
         )
 
+    async def _lookup_past_meetings(
+        self, message: str, state: dict, db: AsyncSession, tenant_id: str,
+    ) -> AgentResponse:
+        """Look up past meetings with transcripts from the database."""
+        try:
+            result = await db.execute(
+                select(Call)
+                .where(Call.tenant_id == tenant_id, Call.status == "completed")
+                .order_by(Call.created_at.desc())
+                .limit(5)
+            )
+            calls = result.scalars().all()
+        except Exception as e:
+            logger.error("Failed to look up past meetings: %s", e)
+            calls = []
+
+        if not calls:
+            return AgentResponse(
+                content=(
+                    "I don't have any past meeting transcripts yet.\n\n"
+                    "Want me to join a meeting? Paste a Zoom, Google Meet, or Teams link."
+                ),
+                state_update=self._set_step(state, "join_meeting", AgentStatus.COLLECTING_INPUT),
+                is_complete=False,
+                needs_input="Paste a meeting link or say done",
+                status=AgentStatus.COLLECTING_INPUT,
+            )
+
+        # Show available meetings
+        lines = ["Here are your recent meetings:\n"]
+        for i, call in enumerate(calls, 1):
+            title = call.title or call.platform or "Untitled"
+            date = call.created_at.strftime("%b %d, %Y") if call.created_at else "Unknown date"
+            has_transcript = "Transcript available" if call.transcript else "No transcript"
+            has_summary = " + Summary" if call.summary else ""
+            lines.append(f"**{i}.** {title} — {date} ({has_transcript}{has_summary})")
+
+        lines.append("\nWhich meeting do you want to see? Reply with the number, or say **all** for the most recent.")
+
+        # Store call IDs for selection
+        new_state = self._set_step(state, "select_meeting", AgentStatus.COLLECTING_INPUT)
+        new_state["past_call_ids"] = [call.id for call in calls]
+
+        return AgentResponse(
+            content="\n".join(lines),
+            state_update=new_state,
+            is_complete=False,
+            needs_input="Which meeting?",
+            status=AgentStatus.COLLECTING_INPUT,
+        )
+
+    async def _select_meeting(
+        self, message: str, state: dict, db: AsyncSession,
+    ) -> AgentResponse:
+        """User picks a past meeting to view."""
+        past_ids = state.get("past_call_ids", [])
+        msg_lower = message.lower()
+
+        # Determine which call to show
+        call_id = None
+        if "all" in msg_lower or "recent" in msg_lower or "latest" in msg_lower or "1" == msg_lower.strip():
+            call_id = past_ids[0] if past_ids else None
+        else:
+            # Try to parse a number
+            for word in message.split():
+                if word.isdigit():
+                    idx = int(word) - 1
+                    if 0 <= idx < len(past_ids):
+                        call_id = past_ids[idx]
+                    break
+
+        if not call_id and past_ids:
+            call_id = past_ids[0]  # Default to most recent
+
+        if not call_id:
+            return AgentResponse(
+                content="Couldn't find that meeting. Please try again with a number from the list.",
+                state_update=state,
+                is_complete=False,
+                status=AgentStatus.COLLECTING_INPUT,
+            )
+
+        result = await db.execute(select(Call).where(Call.id == call_id))
+        call = result.scalar_one_or_none()
+
+        if not call:
+            return AgentResponse(
+                content="Meeting not found. It may have been deleted.",
+                state_update=self._complete(state),
+                is_complete=True,
+                status=AgentStatus.ERROR,
+            )
+
+        # Show summary if available, otherwise transcript
+        content_parts = []
+        title = call.title or call.platform or "Meeting"
+        date = call.created_at.strftime("%b %d, %Y at %I:%M %p") if call.created_at else ""
+        content_parts.append(f"**{title}** — {date}\n")
+
+        if call.summary:
+            content_parts.append(f"**Summary:**\n{call.summary}\n")
+
+        if call.transcript:
+            content_parts.append("Want the full transcript?")
+        else:
+            content_parts.append("No transcript available for this meeting.")
+
+        new_state = self._set_step(state, "deliver", AgentStatus.PROCESSING)
+        new_state["call_id"] = call.id
+        new_state["bot_id"] = state.get("bot_id")
+
+        return AgentResponse(
+            content="\n".join(content_parts),
+            state_update=new_state,
+            is_complete=False,
+            needs_input="Full transcript or done?",
+            status=AgentStatus.AWAITING_CONFIRMATION,
+        )
+
     async def _join_meeting(
         self, message: str, state: dict, db: AsyncSession, user_id: str, tenant_id: str,
     ) -> AgentResponse:
-        """User provides a meeting link."""
+        """User provides a meeting link, or asks about past meetings."""
         match = MEETING_URL_RE.search(message)
-        if not match:
-            return AgentResponse(
-                content="I couldn't find a valid meeting link. Please paste a Zoom, Google Meet, or Teams link.",
-                state_update=state,
-                is_complete=False,
-                needs_input="Paste a valid meeting link",
-                status=AgentStatus.COLLECTING_INPUT,
-            )
-        return await self._do_join(match.group(0), state, db, user_id, tenant_id)
+        if match:
+            return await self._do_join(match.group(0), state, db, user_id, tenant_id)
+
+        # No link — check if they're asking about past meetings instead
+        msg_lower = message.lower()
+        wants_past = any(w in msg_lower for w in [
+            "transcript", "summary", "notes", "last meeting", "older", "previous",
+            "past", "history", "action item", "what did we discuss",
+        ])
+        if wants_past:
+            return await self._lookup_past_meetings(message, state, db, tenant_id)
+
+        return AgentResponse(
+            content="I couldn't find a valid meeting link. Please paste a Zoom, Google Meet, or Teams link.\n\nOr ask me about **past meeting transcripts** if you want to look up an older meeting.",
+            state_update=state,
+            is_complete=False,
+            needs_input="Paste a valid meeting link",
+            status=AgentStatus.COLLECTING_INPUT,
+        )
 
     async def _do_join(
         self, meeting_url: str, state: dict, db: AsyncSession, user_id: str, tenant_id: str,
@@ -393,10 +536,20 @@ class NotetakerAgent(BaseAgent):
         return "\n".join(lines)
 
     async def _deliver(self, message: str, state: dict, db: AsyncSession) -> AgentResponse:
-        """Show full transcript if asked, then complete."""
+        """Show full transcript if asked, handle follow-ups, then complete."""
         call_id = state.get("call_id")
         msg_lower = message.lower()
 
+        # User wants to leave
+        if any(w in msg_lower for w in ["done", "no", "nope", "that's it", "thanks", "thank you", "bye", "exit"]):
+            return AgentResponse(
+                content="Done! Let me know if you need anything else.",
+                state_update=self._complete(state),
+                is_complete=True,
+                status=AgentStatus.COMPLETE,
+            )
+
+        # Show full transcript
         if call_id and any(w in msg_lower for w in ["transcript", "full", "yes", "detail", "show"]):
             result = await db.execute(select(Call).where(Call.id == call_id))
             call = result.scalar_one_or_none()
@@ -406,13 +559,55 @@ class NotetakerAgent(BaseAgent):
                 if len(transcript) > 8000:
                     transcript = transcript[:8000] + "\n\n... [truncated]"
 
+                # Stay active for follow-ups instead of completing immediately
+                new_state = self._set_step(state, "deliver", AgentStatus.PROCESSING)
+                new_state["call_id"] = call_id
+                new_state["bot_id"] = state.get("bot_id")
+                new_state["_transcript_shown"] = True
+
                 return AgentResponse(
-                    content=f"**Full Transcript:**\n\n{transcript}",
-                    state_update=self._complete(state),
-                    is_complete=True,
-                    status=AgentStatus.COMPLETE,
+                    content=(
+                        f"**Full Transcript:**\n\n{transcript}\n\n"
+                        "Anything else about this meeting? Say **done** when you're finished."
+                    ),
+                    state_update=new_state,
+                    is_complete=False,
+                    status=AgentStatus.AWAITING_CONFIRMATION,
                 )
 
+        # Follow-up question about the meeting — re-summarize with the question
+        if call_id and state.get("_transcript_shown"):
+            result = await db.execute(select(Call).where(Call.id == call_id))
+            call = result.scalar_one_or_none()
+            if call and call.transcript:
+                try:
+                    answer = await chat_simple(
+                        prompt=(
+                            f"Based on this meeting transcript, answer the user's question.\n\n"
+                            f"User question: {message}\n\n"
+                            f"Transcript:\n{call.transcript[:12000]}"
+                        ),
+                        system="You are a meeting assistant. Answer concisely based only on the transcript.",
+                        temperature=0.3,
+                        max_tokens=1024,
+                    )
+                except Exception as e:
+                    logger.error("Failed to answer follow-up: %s", e)
+                    answer = "Sorry, I couldn't process that question."
+
+                new_state = self._set_step(state, "deliver", AgentStatus.PROCESSING)
+                new_state["call_id"] = call_id
+                new_state["bot_id"] = state.get("bot_id")
+                new_state["_transcript_shown"] = True
+
+                return AgentResponse(
+                    content=f"{answer}\n\nAnything else? Say **done** when you're finished.",
+                    state_update=new_state,
+                    is_complete=False,
+                    status=AgentStatus.AWAITING_CONFIRMATION,
+                )
+
+        # Default: complete
         return AgentResponse(
             content="Done! Let me know if you need anything else.",
             state_update=self._complete(state),
