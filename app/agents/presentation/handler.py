@@ -173,7 +173,7 @@ class PresentationAgent(BaseAgent):
 
         pres["preview_urls"] = preview_urls
 
-        # Save to DB
+        # Save to DB (non-critical — rollback on failure so session stays usable)
         try:
             from ...models.presentation import Presentation
 
@@ -194,6 +194,10 @@ class PresentationAgent(BaseAgent):
             await db.commit()
         except Exception as e:
             logger.warning("Failed to save presentation record: %s", e)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
 
         new_state = self._set_step(state, "deliver", AgentStatus.COMPLETE)
         new_state["presentation"] = pres
