@@ -1132,6 +1132,77 @@ body {
   border-color: var(--accent);
 }
 
+/* ── File Download Card ─────────────────────────── */
+.file-download-container {
+  margin-top: 12px;
+}
+
+.file-download-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-hover);
+  transition: border-color 0.15s ease;
+}
+
+.file-download-card:hover {
+  border-color: var(--accent);
+}
+
+.file-download-icon {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #c0392b, #e74c3c);
+  color: white;
+}
+
+.file-download-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.file-download-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-download-type {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.file-download-btn {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+  text-decoration: none;
+  transition: all 0.15s ease;
+}
+
+.file-download-btn:hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+}
+
 /* ── Image Preview Overlay ───────────────────────── */
 .image-preview-overlay {
   position: fixed;

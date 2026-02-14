@@ -32,7 +32,7 @@ MAX_MULTIPART_SIZE = 500 * 1024 * 1024   # 500 MB for multipart uploads (videos)
 
 ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".tiff"}
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".wmv", ".m4v", ".3gp"}
-ALLOWED_DOC_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".csv", ".xlsx"}
+ALLOWED_DOC_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".csv", ".xlsx", ".pptx"}
 ALLOWED_EXTENSIONS = ALLOWED_IMAGE_EXTENSIONS | ALLOWED_VIDEO_EXTENSIONS | ALLOWED_DOC_EXTENSIONS
 
 

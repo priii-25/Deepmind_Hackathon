@@ -257,6 +257,10 @@ async def handle_message_stream(
             agent_name == "fashion_photo"
             and agent_state.get("current_step") in ("scene_select", "preview", "preview_feedback")
             and agent_state.get("phase") not in ("preview_shown", "refining", "complete")
+        ) or (
+            # Presentation agent generates slides immediately when topic is given
+            agent_name == "presentation"
+            and agent_state.get("_step", "start") in ("start", "collect_topic", "generate_slides")
         )
         if is_generating:
             yield {"type": "generating", "agent": agent_name, "status": "started"}

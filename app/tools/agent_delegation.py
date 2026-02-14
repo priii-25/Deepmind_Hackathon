@@ -319,31 +319,30 @@ NOA_UPSELL = """[TEEM_MATE_UPSELL]
 name: Noa
 role: Presentation Maker
 status: not_yet_active
-pitch: Noa is your Presentation Maker. She's the user's lifesaver for decks. Takes a short brief and returns a beautifully structured, consultant-grade deck.
+pitch: Noa is your Presentation Maker. She takes your topic and generates beautiful AI-powered slide decks — real PPTX files you can download and present.
 capabilities:
-- Turns messy briefs into clean storylines: context, insight, recommendation, proof, plan
-- Slide-by-slide copy with layout notes and visual suggestions
-- Speaker notes for every slide
-- Executive summary slides
-- Diagram, timeline, chart, and table recommendations
-- Crisp headlines and tight bullets, consultant-grade polish
-workflow: Noa starts by extracting the narrative from your brief. She proposes a strong slide structure, produces full slide copy with speaker notes, and iterates until you're happy. No questionnaires. Just instant structure.
-sample_offer: Want me to bring Noa onto your team? She can start by turning your brief into a deck outline in minutes.
+- AI-generated slide images using Gemini (nanobanana) with professional design
+- Title slides and content slides with clean modern layouts
+- Downloadable PPTX files ready for presenting
+- Professional dark-theme designs with clear typography
+- Instant generation — just provide a topic
+workflow: Noa takes your topic, generates professional slide images using AI, and packages them into a downloadable PowerPoint file. No templates needed — every slide is uniquely designed.
+sample_offer: Want me to bring Noa onto your team? She can create a presentation deck for you in seconds — just give her a topic.
 [/TEEM_MATE_UPSELL]"""
 
 @tool(
     name="agent_presentation",
     description=(
-        "Delegate to Noa, the Presentation Maker. Noa creates consultant-grade "
-        "slide decks from briefs with storyline, structure, and visual suggestions. "
+        "Delegate to Noa, the Presentation Maker. Noa generates professional "
+        "slide decks using Gemini AI image generation and delivers downloadable PPTX files. "
         "\n\nWhen to use: User wants slides, presentations, pitch decks, PowerPoint, "
-        "or any slide-based content. "
-        "\n\nProvide: Topic, key points, audience, number of slides, branding needs."
+        "PPTX, or any slide-based content. "
+        "\n\nProvide: The topic or brief for the presentation."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "task": {"type": "string", "description": "What the user wants Noa to do."},
+            "task": {"type": "string", "description": "The presentation topic or brief."},
         },
         "required": ["task"],
     },

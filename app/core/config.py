@@ -75,11 +75,7 @@ class Settings(BaseSettings):
     )
 
     # --- Presentation ---
-    slidespeak_api_key: str = Field(default="", alias="SLIDESPEAK_API_KEY")
-    slidespeak_base_url: str = Field(
-        default="https://api.slidespeak.co/api/v1",
-        alias="SLIDESPEAK_BASE_URL",
-    )
+    # Uses Gemini 2.5 Flash Image (nanobanana) — shares GEMINI_API_KEY with fashion photo.
 
     # --- Notetaker (Meeting BaaS) ---
     meetingbaas_api_key: str = Field(default="", alias="MEETINGBAAS_API_KEY")

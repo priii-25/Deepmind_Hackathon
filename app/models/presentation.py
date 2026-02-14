@@ -15,7 +15,8 @@ class Presentation(TenantBase):
     conversation_id: Mapped[str] = mapped_column(String, nullable=True, index=True)
     title: Mapped[str] = mapped_column(String, nullable=True)
     s3_url: Mapped[str] = mapped_column(Text, nullable=True)
-    slidespeak_task_id: Mapped[str] = mapped_column(String, nullable=True)
+    file_id: Mapped[str] = mapped_column(String, nullable=True)
+    # file_id is the storage identifier for serving via /v1/upload/{file_id}
     status: Mapped[str] = mapped_column(
         String, nullable=False, default="pending"
     )  # pending, generating, completed, failed

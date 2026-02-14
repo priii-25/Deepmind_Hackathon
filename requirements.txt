@@ -33,4 +33,7 @@ python-multipart>=0.0.18
 google-genai>=1.0.0
 pillow>=10.0.0
 
+# Presentation (PPTX generation)
+python-pptx>=1.0.0
+
 aiosqlite

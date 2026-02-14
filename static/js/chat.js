@@ -435,8 +435,12 @@ async function streamMessage(text, typingEl) {
             break;
 
           case 'media':
-            // Display generated images from agents
-            appendMediaImage(bubble, data.url, fullContent);
+            // Display generated images or file download links
+            if (data.url && (data.url.endsWith('.pptx') || data.url.includes('pptx'))) {
+              appendDownloadFile(bubble, data.url, data.filename || 'presentation.pptx');
+            } else {
+              appendMediaImage(bubble, data.url, fullContent);
+            }
             $messages.scrollTop = $messages.scrollHeight;
             break;
 
@@ -490,6 +494,14 @@ async function streamMessage(text, typingEl) {
             if (data.metadata?.agent === 'fashion_photo') {
               handleFashionUI(data.metadata, data.metadata?.needs_input);
             }
+            // Render PPTX download button for presentation agent
+            if (data.metadata?.download_url) {
+              appendDownloadFile(
+                bubble,
+                data.metadata.download_url,
+                data.metadata.filename || 'presentation.pptx'
+              );
+            }
             break;
 
           case 'error':
@@ -535,16 +547,24 @@ function addMessage(role, content, opts = {}) {
   bubble.innerHTML = formatContent(content);
   wrapper.appendChild(bubble);
 
-  // Media
+  // Media (images + file downloads)
   if (opts.media_urls && opts.media_urls.length) {
     opts.media_urls.forEach(url => {
-      const img = document.createElement('img');
-      img.src = url;
-      img.style.maxWidth = '400px';
-      img.style.borderRadius = '8px';
-      img.style.marginTop = '8px';
-      bubble.appendChild(img);
+      if (url && (url.endsWith('.pptx') || url.includes('pptx'))) {
+        appendDownloadFile(bubble, url, 'presentation.pptx');
+      } else {
+        const img = document.createElement('img');
+        img.src = url;
+        img.style.maxWidth = '400px';
+        img.style.borderRadius = '8px';
+        img.style.marginTop = '8px';
+        bubble.appendChild(img);
+      }
     });
+  }
+  // Download link from metadata
+  if (opts.metadata?.download_url) {
+    appendDownloadFile(bubble, opts.metadata.download_url, opts.metadata.filename || 'presentation.pptx');
   }
 
   // Tool calls metadata
@@ -658,6 +678,32 @@ function downloadImage(url) {
   a.href = url;
   a.download = 'vera-preview.png';
   a.click();
+}
+
+function appendDownloadFile(bubble, url, filename) {
+  // Create a styled download card for non-image files (PPTX, etc.)
+  const container = document.createElement('div');
+  container.className = 'file-download-container';
+  container.innerHTML = `
+    <div class="file-download-card">
+      <div class="file-download-icon">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="12" y1="18" x2="12" y2="12"/>
+          <polyline points="9 15 12 18 15 15"/>
+        </svg>
+      </div>
+      <div class="file-download-info">
+        <div class="file-download-name">${filename}</div>
+        <div class="file-download-type">PowerPoint Presentation</div>
+      </div>
+      <a href="${url}" download="${filename}" class="file-download-btn" title="Download">
+        Download
+      </a>
+    </div>
+  `;
+  bubble.appendChild(container);
 }
 
 // ── Fashion Photo Special UI ─────────────────────────────────────────

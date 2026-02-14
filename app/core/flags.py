@@ -70,7 +70,7 @@ class FeatureFlags(BaseSettings):
     # Requires: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, YOUTUBE_REDIRECT_URI
 
     enable_presentation: bool = Field(default=True, alias="FF_ENABLE_PRESENTATION")
-    # Requires: SLIDESPEAK_API_KEY
+    # Requires: GEMINI_API_KEY (uses Gemini 2.5 Flash Image / nanobanana)
 
     enable_notetaker: bool = Field(default=True, alias="FF_ENABLE_NOTETAKER")
     # Requires: MEETINGBAAS_API_KEY

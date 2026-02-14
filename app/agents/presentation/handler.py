@@ -1,15 +1,18 @@
 """
-Presentation agent — state-machine-based workflow.
+Presentation agent — Noa.
 
-Pipeline: collect_topic → generate_outline → confirm_outline → create_slides → deliver
+Generates professional presentations using Gemini 2.5 Flash Image (nanobanana).
+When a topic is provided, generates slides immediately in the same turn.
 """
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...orchestrator.base_agent import BaseAgent, AgentResponse, AgentStatus
+from ...core.storage import get_storage, LocalStorage
 
 logger = logging.getLogger(__name__)
 
@@ -17,20 +20,23 @@ logger = logging.getLogger(__name__)
 class PresentationAgent(BaseAgent):
     name = "presentation"
     display_name = "Presentation Creator"
-    description = "Creates and edits professional presentations with AI-generated content, branding, and templates"
+    description = (
+        "Creates professional presentations with AI-generated slides. "
+        "Uses Gemini (nanobanana) to generate beautiful slide images "
+        "and packages them into a downloadable PPTX file."
+    )
     triggers = [
         "presentation", "create slides", "make a deck",
         "powerpoint", "pptx", "slide deck", "pitch deck",
         "create presentation",
     ]
     capabilities = [
-        "AI-generated slide content",
-        "Professional templates and layouts",
-        "Brand-consistent styling",
-        "Data visualization slides",
-        "Export to PPTX format (via SlideSpeak)",
+        "AI-generated slide images (Gemini nanobanana)",
+        "Professional title and content slides",
+        "Downloadable PPTX file output",
+        "Clean, modern slide design",
     ]
-    required_inputs = ["presentation topic", "number of slides", "audience type"]
+    required_inputs = ["presentation topic"]
 
     async def handle(
         self,
@@ -45,109 +51,206 @@ class PresentationAgent(BaseAgent):
     ) -> AgentResponse:
 
         step = self.get_step(state)
-        logger.info("Presentation: step=%s", step)
+        logger.info("Presentation: step=%s msg=%s", step, message[:80])
 
-        if step in ("start", "collect_topic"):
-            return await self._collect_topic(message, state)
-        elif step == "generate_outline":
-            return await self._generate_outline(state)
-        elif step == "confirm_outline":
-            return await self._confirm_outline(message, state)
-        elif step == "create_slides":
-            return await self._create_slides(state)
-        else:
-            return await self._collect_topic(message, {})
+        if step == "deliver":
+            return await self._deliver(state)
 
-    async def _collect_topic(self, message: str, state: dict) -> AgentResponse:
-        """Collect presentation topic and requirements."""
-        pres = state.get("presentation", {})
-        pres["topic"] = message.strip()
-        pres.setdefault("num_slides", 10)
-        pres.setdefault("audience", "professional")
+        # For start, collect_topic, or generate_slides:
+        # Extract topic from message and generate immediately
+        topic = self._extract_topic(message, state)
 
-        new_state = self._set_step(state, "generate_outline", AgentStatus.PROCESSING)
-        new_state["presentation"] = pres
-
-        return AgentResponse(
-            content=f"Creating a presentation about: **{pres['topic']}**\n\nGenerating outline...",
-            state_update=new_state,
-            is_complete=False,
-            status=AgentStatus.PROCESSING,
-        )
-
-    async def _generate_outline(self, state: dict) -> AgentResponse:
-        """Generate presentation outline. (LLM placeholder)"""
-        pres = state.get("presentation", {})
-        topic = pres.get("topic", "Topic")
-        num = pres.get("num_slides", 10)
-
-        # TODO: Use LLM to generate outline
-        outline = [
-            "1. Title Slide",
-            f"2. Introduction to {topic}",
-            "3. Problem Statement",
-            "4. Market Opportunity",
-            "5. Our Solution",
-            "6. Key Features",
-            "7. Competitive Advantage",
-            "8. Traction & Metrics",
-            "9. Roadmap",
-            f"10. Summary & Call to Action",
-        ][:num]
-
-        pres["outline"] = outline
-        new_state = self._set_step(state, "confirm_outline", AgentStatus.AWAITING_CONFIRMATION)
-        new_state["presentation"] = pres
-
-        return AgentResponse(
-            content=(
-                f"Here's the outline for your {num}-slide deck:\n\n"
-                + "\n".join(outline)
-                + "\n\nLooks good? Say 'yes' to generate slides, or tell me what to change."
-            ),
-            state_update=new_state,
-            is_complete=False,
-            needs_input="Confirm outline or request changes",
-            status=AgentStatus.AWAITING_CONFIRMATION,
-        )
-
-    async def _confirm_outline(self, message: str, state: dict) -> AgentResponse:
-        """Confirm or revise the outline."""
-        if message.lower().strip() in ("yes", "y", "go", "proceed", "looks good", "ok"):
-            new_state = self._set_step(state, "create_slides", AgentStatus.PROCESSING)
+        if not topic or len(topic) < 3:
             return AgentResponse(
-                content="Generating your presentation slides...",
-                state_update=new_state,
+                content=(
+                    "What would you like the presentation to be about? "
+                    "Give me a topic and I'll create a 2-slide deck for you."
+                ),
+                state_update=self._set_step(state, "collect_topic", AgentStatus.COLLECTING_INPUT),
                 is_complete=False,
-                status=AgentStatus.PROCESSING,
-            )
-        else:
-            new_state = self._set_step(state, "collect_topic", AgentStatus.COLLECTING_INPUT)
-            return AgentResponse(
-                content="Got it. Tell me what you'd like to change about the outline.",
-                state_update=new_state,
-                is_complete=False,
-                needs_input="What changes would you like?",
+                needs_input="Presentation topic",
                 status=AgentStatus.COLLECTING_INPUT,
             )
 
-    async def _create_slides(self, state: dict) -> AgentResponse:
-        """Create the actual slides. (SlideSpeak API placeholder)"""
-        pres = state.get("presentation", {})
-        outline = pres.get("outline", [])
+        # Topic is ready — generate immediately
+        return await self._generate_slides(topic, state, db, user_id, tenant_id)
 
-        # TODO: Call SlideSpeak API to create slides
-        new_state = self._complete(state)
+    # ── Helpers ───────────────────────────────────────────────────────
+
+    def _extract_topic(self, message: str, state: dict) -> str:
+        """Extract the topic from the message or existing state."""
+        topic = message.strip()
+        if topic and len(topic) >= 3:
+            return topic
+        # Fall back to topic saved in state (from a previous collect step)
+        pres = state.get("presentation", {})
+        return pres.get("topic", "")
+
+    # ── Generate slides + PPTX (runs in same turn as topic collection) ─
+
+    async def _generate_slides(
+        self,
+        topic: str,
+        state: dict,
+        db: AsyncSession,
+        user_id: str,
+        tenant_id: str,
+    ) -> AgentResponse:
+        """Generate slide images via Gemini and assemble PPTX."""
+        from ...services.presentation_gen import generate_presentation
+
+        logger.info("Generating presentation for topic: %r", topic)
+
+        try:
+            pptx_bytes, slide_images = await generate_presentation(topic)
+        except Exception as e:
+            logger.error("Presentation generation failed: %s", e, exc_info=True)
+            new_state = self._set_step(state, "collect_topic", AgentStatus.ERROR)
+            return AgentResponse(
+                content=(
+                    f"Sorry, I ran into an issue generating the slides: {e}\n\n"
+                    "Would you like to try again with the same topic or a different one?"
+                ),
+                state_update=new_state,
+                is_complete=False,
+                needs_input="Try again or new topic",
+                status=AgentStatus.ERROR,
+            )
+
+        # Save PPTX to storage
+        storage = get_storage()
+        safe_name = "".join(c if c.isalnum() or c in " -_" else "" for c in topic)[:50]
+        filename = f"{safe_name.strip()}.pptx"
+
+        pres = {"topic": topic, "num_slides": 2}
+
+        try:
+            path_or_url = await storage.upload(
+                file_bytes=pptx_bytes,
+                filename=filename,
+                tenant_id=tenant_id,
+                folder="presentations",
+            )
+
+            # Build servable URL
+            if isinstance(storage, LocalStorage):
+                file_id = Path(path_or_url).stem
+                download_url = f"/v1/upload/{file_id}"
+            else:
+                download_url = path_or_url
+
+            pres["download_url"] = download_url
+            pres["file_id"] = file_id if isinstance(storage, LocalStorage) else ""
+            pres["filename"] = filename
+
+        except Exception as e:
+            logger.error("Failed to save PPTX: %s", e, exc_info=True)
+            new_state = self._set_step(state, "collect_topic", AgentStatus.ERROR)
+            return AgentResponse(
+                content=f"Generated the slides but failed to save the file: {e}",
+                state_update=new_state,
+                is_complete=False,
+                status=AgentStatus.ERROR,
+            )
+
+        # Save slide preview images to storage
+        preview_urls = []
+        for i, img_bytes in enumerate(slide_images):
+            try:
+                img_path = await storage.upload(
+                    file_bytes=img_bytes,
+                    filename=f"slide_{i + 1}.png",
+                    tenant_id=tenant_id,
+                    folder="presentations",
+                )
+                if isinstance(storage, LocalStorage):
+                    img_id = Path(img_path).stem
+                    preview_urls.append(f"/v1/upload/{img_id}")
+                else:
+                    preview_urls.append(img_path)
+            except Exception as e:
+                logger.warning("Failed to save slide preview %d: %s", i + 1, e)
+
+        pres["preview_urls"] = preview_urls
+
+        # Save to DB
+        try:
+            from ...models.presentation import Presentation
+
+            record = Presentation(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                title=topic,
+                s3_url=download_url,
+                file_id=pres.get("file_id", ""),
+                status="completed",
+                presentation_metadata={
+                    "num_slides": 2,
+                    "model": "gemini-2.5-flash-image",
+                    "preview_urls": preview_urls,
+                },
+            )
+            db.add(record)
+            await db.commit()
+        except Exception as e:
+            logger.warning("Failed to save presentation record: %s", e)
+
+        new_state = self._set_step(state, "deliver", AgentStatus.COMPLETE)
+        new_state["presentation"] = pres
+
+        # Build response with download link and slide previews
+        content = (
+            f"Your presentation is ready! **{topic}** -- 2 slides\n\n"
+            f"[Download PPTX]({download_url})\n\n"
+        )
+
+        # Include slide preview images as media URLs
+        media = list(preview_urls)
 
         return AgentResponse(
-            content=(
-                f"Your presentation is ready! ({len(outline)} slides)\n\n"
-                f"Topic: {pres.get('topic', 'N/A')}\n"
-                f"Slides: {len(outline)}\n\n"
-                "(SlideSpeak API integration coming soon — will generate downloadable PPTX.)\n\n"
-                "Need any changes or a new presentation?"
-            ),
+            content=content,
+            media_urls=media,
             state_update=new_state,
             is_complete=True,
             status=AgentStatus.COMPLETE,
+            metadata={
+                "download_url": download_url,
+                "filename": filename,
+                "content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "preview_urls": preview_urls,
+            },
+        )
+
+    # ── Deliver (re-entry after completion) ──────────────────────────
+
+    async def _deliver(self, state: dict) -> AgentResponse:
+        """Re-deliver the download link or start fresh."""
+        pres = state.get("presentation", {})
+        download_url = pres.get("download_url")
+
+        if download_url:
+            return AgentResponse(
+                content=(
+                    f"Here's your presentation again: [Download PPTX]({download_url})\n\n"
+                    "Would you like me to create a new presentation?"
+                ),
+                state_update=self._complete(state),
+                is_complete=True,
+                status=AgentStatus.COMPLETE,
+                metadata={
+                    "download_url": download_url,
+                    "filename": pres.get("filename", "presentation.pptx"),
+                },
+            )
+
+        # No saved presentation — start fresh
+        return AgentResponse(
+            content=(
+                "What would you like the presentation to be about? "
+                "Give me a topic and I'll create a 2-slide deck for you."
+            ),
+            state_update=self._set_step({}, "collect_topic", AgentStatus.COLLECTING_INPUT),
+            is_complete=False,
+            needs_input="Presentation topic",
+            status=AgentStatus.COLLECTING_INPUT,
         )
