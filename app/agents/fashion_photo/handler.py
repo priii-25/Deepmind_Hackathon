@@ -451,6 +451,7 @@ class FashionPhotoAgent(BaseAgent):
         tenant_id: str,
         files: Optional[list] = None,
         history: Optional[list[dict]] = None,
+        **kwargs,
     ) -> AgentResponse:
         """
         Handle a message in the fashion photo workflow.

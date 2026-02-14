@@ -46,6 +46,7 @@ class UGCVideoAgent(BaseAgent):
         tenant_id: str,
         files: Optional[list] = None,
         history: Optional[list[dict]] = None,
+        **kwargs,
     ) -> AgentResponse:
 
         step = self.get_step(state)
